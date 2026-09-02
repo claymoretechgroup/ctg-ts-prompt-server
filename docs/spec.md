@@ -154,6 +154,8 @@ class CTGPromptServer {
 
     start(port: number): Promise<void>;
     close(): Promise<void>;
+
+    protected createRunner(config: CTGPromptRunnerConfig): LLMRunner;
 }
 
 class CTGPromptQueue {
@@ -478,7 +480,9 @@ prompt is dispatched, and no socket is bound.
    `CTGPromptServerError("INTERNAL_ERROR", "Server has already been started.")`.
    A server is started once; a second call would construct a second
    runner and a second dispatch loop over the same database.
-2. Construct the runner from `config.runner`:
+2. Construct the runner by calling `this.createRunner(config.runner)`.
+   `createRunner :: CTGPromptRunnerConfig -> LLMRunner` is a
+   **protected** instance method whose default behavior is:
    - `kind: "claude"` → `ClaudeRunner.init({ ... })`
    - `kind: "codex"` → `CodexRunner.init({ ... })`
 
@@ -491,6 +495,11 @@ prompt is dispatched, and no socket is bound.
    `streamMode`, and `onStream` are per-run values supplied by §5.4.
    If the runner constructor throws, wrap it:
    `CTGPromptServerError("INVALID_CONFIG", <the runner error's message>, { cause })`.
+   `createRunner` is the one seam through which a subclass can supply a
+   different `LLMRunner` — the conformance suite's `FakeRunner` (§11)
+   enters here. It is protected, not config: an operator never chooses
+   a runner by anything other than `kind`, and a test-only config field
+   would be a second way to do what `kind` does.
 3. Build `CTGPromptQueue` with the resolved config of §3.2.
 4. Call `queue.recover()` (§4.3).
 5. Call `queue.dispatch()`.
@@ -1646,9 +1655,22 @@ behavior (which prompts are `active` in the database) rather than on the
 The fake also asserts the call contract: `run` is called with the text
 **byte-identical** to what was submitted, and with exactly
 `{ streamOutput: true, streamMode, onStream }` and nothing else (D1,
-D4). A `CTGPromptServer` under test is constructed with
-`runner: { kind }` as any other, and the suite substitutes the fake for
-the instance `start` built.
+D4). A `CTGPromptServer` under test is a subclass that overrides the
+protected `createRunner` seam (§4.2 step 2) to return the scripted fake,
+and is otherwise constructed with `runner: { kind }` like any other:
+
+```typescript
+class TestPromptServer extends CTGPromptServer {
+    static fake: FakeRunner;
+    protected override createRunner(): LLMRunner { return TestPromptServer.fake; }
+}
+```
+
+`kind` still governs what the server *records* — the `runner` field on
+records and `active` events (R25) and the `"events"`-mode extraction
+table (§5.5) — so a case that scripts `ClaudeRunnerEvent`s constructs
+the server with `kind: "claude"` and one that scripts
+`CodexRunnerEvent`s with `kind: "codex"`.
 
 **The SSE client.** `EventStreamClient` is a dedicated test helper
 class, not an ad-hoc block inside a case:
