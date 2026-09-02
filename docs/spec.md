@@ -152,7 +152,7 @@ class CTGPromptServer {
     readonly db: CTGPromptDB;
     readonly queue: CTGPromptQueue;
 
-    start(port: number): Promise<void>;
+    start(port: number): Promise<{ host: string; port: number }>;
     close(): Promise<void>;
 
     protected createRunner(config: CTGPromptRunnerConfig): LLMRunner;
@@ -405,7 +405,7 @@ active by a dead process, begins dispatching, and binds the port.
 | `app` | `GETTER :: VOID -> express` | The configured Express application | |
 | `db` | `GETTER :: VOID -> ctgPromptDB` | The database, exposed for tests | |
 | `queue` | `GETTER :: VOID -> ctgPromptQueue` | The dispatcher; throws `INTERNAL_ERROR` before `start` (§4.2) | |
-| `start` | `NUMBER:port -> PROMISE(VOID)` | Construct the runner, recover, dispatch, bind the socket on `port` and the configured `host` (§4.2) | Database: active rows moved to `error`; spawns child processes; binds a socket |
+| `start` | `NUMBER:port -> PROMISE({host, port})` | Construct the runner, recover, dispatch, bind the socket on `port` and the configured `host` (§4.2) | Database: active rows moved to `error`; spawns child processes; binds a socket |
 | `close` | `VOID -> PROMISE(VOID)` | Stop listening, end every open sink, close the database (§4.4) | Closes socket, subscribers, database |
 
 `CTGPromptServer` exposes no purge operation. Purging is
@@ -444,6 +444,9 @@ Performs these steps in order. Any failure throws
 10. `database`, when supplied, must be a non-empty string.
 11. Open `CTGPromptDB` with `{ path: database }` — creating the schema
     if absent (§6.1).
+    `init` constructs the instance with `new this(...)`, so a subclass
+    calling `init` receives an instance of the subclass — which is how
+    a `createRunner` override (§4.2) takes effect.
 12. Build `CTGPromptSubscribers`.
 13. Build the Express application: the auth middleware, the routes of
     §8.1, and the error handler of §8.4.
@@ -474,7 +477,13 @@ prompt is dispatched, and no socket is bound.
 
 *realizes: R21, R23, R24*
 
-`start :: NUMBER:port -> PROMISE(VOID)`
+`start :: NUMBER:port -> PROMISE({ host: STRING, port: NUMBER })`
+
+`port` is an integer in `0..65535`; anything else throws
+`CTGPromptServerError("INVALID_CONFIG")` before any step below runs.
+`0` asks the operating system for an ephemeral port. `start` resolves
+with the address actually bound, so a caller that passed `0` learns the
+port from the result — the conformance suite depends on this (§11).
 
 1. If `start` has already been called on this instance, throw
    `CTGPromptServerError("INTERNAL_ERROR", "Server has already been started.")`.
@@ -493,7 +502,8 @@ prompt is dispatched, and no socket is bound.
    `maxBuffer` passed only when present so the runner keeps its own
    default. Nothing else is passed at construction: `streamOutput`,
    `streamMode`, and `onStream` are per-run values supplied by §5.4.
-   If the runner constructor throws, wrap it:
+   If `createRunner` throws — the runner constructor or an override —
+   wrap it:
    `CTGPromptServerError("INVALID_CONFIG", <the runner error's message>, { cause })`.
    `createRunner` is the one seam through which a subclass can supply a
    different `LLMRunner` — the conformance suite's `FakeRunner` (§11)
@@ -504,7 +514,8 @@ prompt is dispatched, and no socket is bound.
 4. Call `queue.recover()` (§4.3).
 5. Call `queue.dispatch()`.
 6. Bind the socket on `port` and the configured `host` (§3.3, default
-   `"127.0.0.1"`) and resolve when it is listening.
+   `"127.0.0.1"`) and, once it is listening, resolve with
+   `{ host, port }` read back from the bound socket.
 
 Note steps 4 and 5: **prompts left `pending` by a previous process start
 are claimed as soon as this process starts, before it accepts a request.**
@@ -1255,7 +1266,16 @@ between registration and replay. This is why no in-memory buffering step
 is needed. As a second guard, each subscription records the highest
 sequence it has written and drops any published event whose sequence is
 not greater — so a live event that was also in the replay is written
-once, not twice.
+once, not twice. Replay in step 5 writes **through the subscription**,
+not directly to the sink, so the high-water mark covers replayed events
+as well as live ones. Every event, replayed or live, is exactly one
+`sink.write` call carrying the complete frame of §7.3 — three lines and
+the blank line — never a partial frame and never two frames in one
+write.
+
+A sink whose `write` throws is deregistered immediately, its `end()` is
+attempted and any throw from `end()` is swallowed, and the fan-out
+continues to the remaining sinks (Judgment Call 16).
 
 **Boundary behaviors:**
 
@@ -1338,6 +1358,14 @@ choose it (D1).
 `:id` must be a base-10 integer of one or more digits. Anything else is
 `INVALID_QUERY` (400) — the segment did not parse, which is a
 malformed request, not a missing prompt.
+
+**Detection order on every route:** authentication (§8.2), then the
+path segments (`:id`, `:status`), then the query string (`wait`,
+`limit`, `before`), then the body, and only then the prompt lookup. A
+malformed request is rejected before the database is consulted, so
+`GET /prompt/1?wait=abc` is `INVALID_QUERY` whether or not prompt 1
+exists. The numbered lists below give each route's checks; this
+paragraph gives the order across them.
 
 **`POST /prompt`** — *realizes: D1, D4, D8, R11, R26*
 
@@ -1834,6 +1862,30 @@ so and give the reason.
 22. **SSE tests assert on frames parsed by a dedicated helper class,
     with the raw text retained** (§11), because the wire format is the
     contract and a general-purpose client library would hide it (R28).
+
+---
+
+## Appendix A. The decision list
+
+The upstream layer this spec realizes, recorded verbatim so that
+`realizes:` back-pointers and test labels have a definition to point at.
+Settled with the owner on 2026-09-02, before the first draft.
+
+| # | Decision |
+|---|---|
+| D1 | The only client input is a raw prompt string. No runner name, no per-run CLI args, no stream mode. One runner per server, configured at startup. |
+| D2 | Express is the HTTP host — a deliberate override of the `ctg-ts-web-server` SQ-1 dependency rule, because this is a service whose behavior is the prompt model and Express supplies only the mechanical HTTP part. |
+| D3 | SQLite through `node:sqlite`; the Node 22 experimental warning is accepted. |
+| D4 | No prompt templates and no client-supplied `LLMPrompt` operations; the text goes to the runner unchanged. |
+| D5 | On restart, pending prompts survive; prompts that were active become `error` as interrupted; resubmission is the client's decision. |
+| D6 | Cancel applies to pending prompts only; running-prompt cancel waits for an abort signal upstream. |
+| D7 | One global concurrency limit, default 1; FIFO by submission. |
+| D8 | Prompts and events are kept forever; an npm script purges finished ones; the prompt is capped by a configurable byte limit and the empty string is rejected; the event log is bounded by the runner's `maxBuffer`. |
+| D9 | No operational logging in v1; fatal errors surface as ordinary process behavior. |
+| D10 | A shared API key in a request header on every route; the server refuses to start without one. |
+
+The review resolutions R1–R31 refine these; where the two differ the
+resolution governs and both are cited.
 
 ---
 
