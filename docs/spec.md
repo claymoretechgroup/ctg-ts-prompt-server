@@ -1,4 +1,4 @@
-# ctg-ts-llm-prompt-server v1.0 — Specification
+# ctg-ts-prompt-server v1.0 — Specification
 
 **Target:** TypeScript (ES modules, Node.js 22.22, `strict: true`)
 **Code style:** `ctg-spec-ops/code-styles/typescript-code-style.md`
@@ -14,7 +14,7 @@ to its host.
 Nothing else. `ctg-js-test` is a dev dependency.
 
 This document is the authoritative description of what
-`ctg-ts-llm-prompt-server` is and how it behaves. If a method, field, route,
+`ctg-ts-prompt-server` is and how it behaves. If a method, field, route,
 column, or behavior is not described here, it does not exist.
 
 ---
@@ -23,7 +23,7 @@ column, or behavior is not described here, it does not exist.
 
 *realizes: M*
 
-`ctg-ts-llm-prompt-server` is a **durable job service that exposes one LLM
+`ctg-ts-prompt-server` is a **durable job service that exposes one LLM
 runner over HTTP.**
 
 A **job** is a prompt waiting its turn on the server's runner. A client
