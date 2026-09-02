@@ -580,10 +580,18 @@ final event like any other failure.
 
 `close :: VOID -> PROMISE(VOID)`
 
-1. Stop the HTTP listener and wait for it to close.
+1. Stop the listener accepting new connections.
 2. `subscribers.closeAll()` — every open SSE response and every waiting
-   long-poll response is ended.
-3. `db.close()`.
+   long-poll response is ended. This must happen **before** waiting on
+   the listener: an HTTP server's close completes only when every
+   connection has ended, and an open SSE response is a live connection
+   that nothing else will end.
+3. Wait for the listener to close, closing any remaining idle or
+   in-flight connection rather than waiting on it.
+4. `db.close()`.
+
+`close()` resolves promptly regardless of how many streams or waiters
+are open; it never blocks on a client.
 
 **Mutation:** closes the socket, ends every open sink, closes the
 database handle. No row is written.
@@ -1371,8 +1379,15 @@ paragraph gives the order across them.
 
 1. Reject if `Content-Type` is not `application/json`
    (`INVALID_CONTENT_TYPE`, 415).
-2. Body must be a JSON object with a `prompt` property
-   (`INVALID_BODY`, 400).
+2. Body must parse as JSON and be a JSON object with a `prompt`
+   property (`INVALID_BODY`, 400). Malformed JSON is `INVALID_BODY`,
+   not an internal error. The body reader accepts up to **1 MiB**
+   (1,048,576 bytes), fixed, not configurable: the largest legal prompt
+   is 131,071 bytes and JSON escaping expands a byte to at most six
+   characters (`\u0000`), so every prompt the limit admits fits with
+   room to spare, and a body over 1 MiB is `INVALID_BODY` (400) with a
+   message naming the limit. The body limit is never what rejects a
+   legal prompt; `maxPromptBytes` is (§5.1).
 3. `queue.submit(body.prompt)` — which raises `INVALID_PROMPT` for
    non-strings, empty or whitespace-only text, and oversized text
    (§5.1).
