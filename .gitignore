@@ -1,0 +1,27 @@
+# AI
+.claude/
+.agents/
+.codex/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# JavaScript
+node_modules/
+dist/
+
+# Runtime
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
