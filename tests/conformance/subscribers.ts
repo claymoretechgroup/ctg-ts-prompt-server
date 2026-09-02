@@ -42,7 +42,7 @@ const event = (sequence: number, name = "stream"): EventRecord => ({
 });
 
 export default CTGTest.init("subscribers")
-    .assert("§7.3/D2 subscribers fan out one committed event to every sink for a prompt", () => {
+    .assert("§7.3 subscribers fan out one committed event to every sink for a prompt", () => {
         const subscribers = CTGPromptSubscribers.init();
         const one = new CaptureSink();
         const two = new CaptureSink();
@@ -72,7 +72,7 @@ export default CTGTest.init("subscribers")
 
         return sink.chunks.length;
     }, P.equals(2))
-    .assert("§7.3/D16 sink write errors close and drop only the failing sink", () => {
+    .assert("§7.3 sink write errors close and drop only the failing sink", () => {
         const subscribers = CTGPromptSubscribers.init();
         const throwing = new CaptureSink(true);
         const healthy = new CaptureSink();
@@ -138,11 +138,13 @@ export default CTGTest.init("subscribers")
 
         return {
             ended: sink.ended,
-            chunks: sink.chunks.length
+            chunks: sink.chunks.length,
+            rawShape: sink.chunks.every((chunk) => /^id: \d+\nevent: [a-z]+\ndata: .+\n\n$/.test(chunk))
         };
     }, P.equals({
         ended: true,
-        chunks: 3
+        chunks: 3,
+        rawShape: true
     }))
     .assert("§11 cleanup temp databases", () => {
         cleanupTempDatabases();

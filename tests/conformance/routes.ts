@@ -98,7 +98,7 @@ export default CTGTest.init("routes")
 
         return isErrorEnvelope(response, "INVALID_PROMPT", 400);
     }, P.isTrue())
-    .assert("§8.1/§9.1 INVALID_QUERY covers bad id, status, limit, before, and wait", async () => {
+    .assert("§8.1 detection order/§9.1 INVALID_QUERY covers bad id, status, limit, before, and wait before lookup", async () => {
         const fixture = await startServerFixture([], {
             database: tempDatabasePath("routes-invalid-query")
         });
@@ -107,7 +107,7 @@ export default CTGTest.init("routes")
             httpRequest({ method: "GET", path: "/prompts/finished", port: fixture.port, apiKey: API_KEY }),
             httpRequest({ method: "GET", path: "/prompts?limit=0", port: fixture.port, apiKey: API_KEY }),
             httpRequest({ method: "GET", path: "/prompts?before=0", port: fixture.port, apiKey: API_KEY }),
-            httpRequest({ method: "GET", path: "/prompt/1?wait=soon", port: fixture.port, apiKey: API_KEY })
+            httpRequest({ method: "GET", path: "/prompt/1?wait=abc", port: fixture.port, apiKey: API_KEY })
         ]);
 
         await fixture.server.close();

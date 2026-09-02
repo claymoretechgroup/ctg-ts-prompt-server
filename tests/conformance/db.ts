@@ -118,7 +118,7 @@ export default CTGTest.init("db")
 
         return {
             claimedId: claimed?.prompt.id,
-            firstStatus: dbSafeStatus(claimed?.prompt),
+            firstStatus: claimed?.prompt.status,
             secondStatus: secondRecord?.status,
             activeName: active?.name,
             activePayload: active?.payload,
@@ -179,7 +179,7 @@ export default CTGTest.init("db")
 
         return CTGPromptServerError.is(caught) && caught.type === "PROMPT_NOT_FOUND";
     }, P.isTrue())
-    .assert("§6.5 finishPrompt records done outcome, info, and terminal event", () => {
+    .assert("§6 table/§5.4 finishPrompt records done outcome, info, and terminal event", () => {
         const db = openDB("db-finish");
         const prompt = db.insertPrompt("finish");
 
@@ -267,10 +267,6 @@ export default CTGTest.init("db")
             return false;
         }
 
-        if (!isObject(value)) {
-            return false;
-        }
-
         const row = value as {
             firstIds?: unknown;
             nextBefore?: unknown;
@@ -293,7 +289,3 @@ export default CTGTest.init("db")
         cleanupTempDatabases();
         return true;
     }, P.isTrue());
-
-const dbSafeStatus = (record: { readonly status: string } | undefined): string | undefined => {
-    return record?.status;
-};

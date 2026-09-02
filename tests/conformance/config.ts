@@ -63,7 +63,7 @@ export default CTGTest.init("config")
             && caught.type === "INTERNAL_ERROR"
             && caught.msg === "Server has not been started.";
     }, P.isTrue())
-    .assert("§3.2/§5.4 streamMode defaults to events on runner.run", async () => {
+    .assert("§3.2/§5.4 streamMode defaults to events on runner.run without contract violations", async () => {
         const fixture = await startServerFixture([{
             behavior: "resolve",
             expectedPrompt: "default stream mode",
@@ -77,9 +77,15 @@ export default CTGTest.init("config")
         await fixture.server.queue.drain();
         await fixture.server.close();
 
-        return fixture.runner.calls[0]?.streamMode;
-    }, P.equals("events"))
-    .assert("§4.2 runner kind still records runner field and active event payload (R25/D10)", async () => {
+        return {
+            streamMode: fixture.runner.calls[0]?.streamMode,
+            violations: fixture.runner.violations
+        };
+    }, P.equals({
+        streamMode: "events",
+        violations: []
+    }))
+    .assert("§4.2/R25 runner kind still records runner field and active event payload", async () => {
         const fixture = await startServerFixture([{
             behavior: "resolve",
             expectedPrompt: "kind recorded",

@@ -1,5 +1,4 @@
 // Dependencies:
-import { createServer } from "node:http";                             // Reserves loopback ports without external network access
 import { mkdtempSync, rmSync } from "node:fs";                         // Creates and removes hermetic suite database directories
 import { tmpdir } from "node:os";                                      // Supplies the system temp root for suite databases
 import { join } from "node:path";                                      // Builds portable temp database paths
@@ -101,7 +100,7 @@ export interface HTTPTestRequest {
 // TYPE :: {port:NUMBER, server:ctgPromptServer, runner:fakeRunner}
 // Started server fixture returned by HTTP/SSE helpers.
 export interface StartedServerFixture {
-    readonly port: number;                               // Reserved loopback port used for the server
+    readonly port: number;                               // Actual loopback port bound by start(0)
     readonly server: CTGPromptServer;                    // Started server instance under test
     readonly runner: FakeRunner;                         // Scripted runner injected into the server
 }
@@ -152,9 +151,11 @@ const TEMP_PATHS: string[] = [];                           // Suite temp directo
 export class FakeRunner extends LLMRunner {
 
     /* Instance Fields */
+    readonly violations: readonly string[];                           // Public non-fatal §11 contract failures observed by run()
     private readonly _scripts: FakeRunnerScript[];                  // Pending scripts consumed one per run() call
     private readonly _expectedStreamMode: StreamMode;               // Expected per-run streamMode from queue config
     private readonly _calls: FakeRunnerCall[];                      // Recorded invocation contracts for assertions
+    private readonly _violations: string[];                         // Non-fatal §11 contract failures observed by run()
     private readonly _blockedResolvers: Array<(value: LLMRunnerResult) => void>; // Release hooks for blocked runs
 
     // CONSTRUCTOR :: [fakeRunnerScript], streamMode -> this
@@ -166,6 +167,8 @@ export class FakeRunner extends LLMRunner {
         this._scripts = [...scripts];
         this._expectedStreamMode = expectedStreamMode;
         this._calls = [];
+        this._violations = [];
+        this.violations = this._violations;
         this._blockedResolvers = [];
     }
 
@@ -196,7 +199,7 @@ export class FakeRunner extends LLMRunner {
             throw new Error("FakeRunner was called without a script.");
         }
 
-        this._assertCallContract(prompt, config, script.expectedPrompt);
+        this._recordCallContractViolations(prompt, config, script.expectedPrompt);
         this._calls.push({
             prompt,
             configKeys: Object.keys(config).sort(),
@@ -247,26 +250,28 @@ export class FakeRunner extends LLMRunner {
      */
 
     // METHOD :: STRING, llmRunnerRunConfig, STRING? -> VOID
-    // Verifies byte-identical prompt forwarding and exact per-run streaming options.
-    private _assertCallContract(prompt: string, config: LLMRunnerRunConfig, expectedPrompt?: string): void {
+    // Records byte-identical prompt and exact per-run streaming option violations.
+    private _recordCallContractViolations(prompt: string, config: LLMRunnerRunConfig, expectedPrompt?: string): void {
         const expected = expectedPrompt ?? prompt;
 
         if (Buffer.compare(Buffer.from(prompt, "utf8"), Buffer.from(expected, "utf8")) !== 0) {
-            throw new Error("FakeRunner received transformed prompt text.");
+            this._violations.push("FakeRunner received transformed prompt text.");
         }
 
         const keys = Object.keys(config).sort();
 
-        assertDeepEqual(keys, ["onStream", "streamMode", "streamOutput"]);
+        if (JSON.stringify(keys) !== JSON.stringify(["onStream", "streamMode", "streamOutput"])) {
+            this._violations.push(`FakeRunner received config keys ${keys.join(",")}.`);
+        }
 
         if (config.streamOutput !== true) {
-            throw new Error("FakeRunner expected streamOutput: true.");
+            this._violations.push("FakeRunner expected streamOutput: true.");
         }
         if (config.streamMode !== this._expectedStreamMode) {
-            throw new Error("FakeRunner received the wrong streamMode.");
+            this._violations.push("FakeRunner received the wrong streamMode.");
         }
         if (typeof config.onStream !== "function") {
-            throw new Error("FakeRunner expected an onStream function.");
+            this._violations.push("FakeRunner expected an onStream function.");
         }
     }
 
@@ -330,28 +335,6 @@ export const cleanupTempDatabases = (): void => {
     }
 };
 
-// METHOD :: VOID -> PROMISE(NUMBER)
-// Reserves and returns a loopback port for a started server fixture.
-export const reservePort = async (): Promise<number> => {
-    const server = createServer();
-
-    return await new Promise<number>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(0, "127.0.0.1", () => {
-            const address = server.address();
-
-            server.close(() => {
-                if (typeof address === "object" && address !== null) {
-                    resolve(address.port);
-                    return;
-                }
-
-                reject(new Error("Failed to reserve loopback port."));
-            });
-        });
-    });
-};
-
 // METHOD :: [fakeRunnerScript], PARTIAL(ctgPromptServerConfig)? -> PROMISE(startedServerFixture)
 // Starts a CTGPromptServer fixture with a FakeRunner and a temp database.
 export const startServerFixture = async (
@@ -360,7 +343,6 @@ export const startServerFixture = async (
 ): Promise<StartedServerFixture> => {
     const streamMode = config.streamMode ?? "events";
     const runner = new FakeRunner(scripts, streamMode);
-    const port = await reservePort();
 
     TestPromptServer.fake = runner;
 
@@ -385,10 +367,10 @@ export const startServerFixture = async (
         maxLimit: config.maxLimit ?? 200
     });
 
-    await server.start(port);
+    const bound = await server.start(0);
 
     return {
-        port,
+        port: bound.port,
         server,
         runner
     };
@@ -603,4 +585,3 @@ export const allEvents = (db: CTGPromptDB, id: number): EventRecord[] => {
 export const isFinishedStatus = (status: PromptStatus): boolean => {
     return status === "done" || status === "error" || status === "cancelled";
 };
-

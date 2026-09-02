@@ -87,6 +87,46 @@ export default CTGTest.init("response")
         during: "Hello",
         done: "Hello final"
     }))
+    .assert("§5.5 events mode ignores non-text stream and stderr output events for response", async () => {
+        const fixture = await startServerFixture([{
+            behavior: "block",
+            expectedPrompt: "claude non text",
+            events: [
+                new ClaudeRunnerEvent("ClaudeRunner", {
+                    type: "system"
+                }),
+                outputEvent("stderr", "diagnostic"),
+                new ClaudeRunnerEvent("ClaudeRunner", {
+                    type: "assistant",
+                    message: {
+                        content: [{ type: "text", text: "Only text" }]
+                    }
+                })
+            ]
+        }], {
+            runner: {
+                kind: "claude"
+            },
+            database: tempDatabasePath("response-non-text")
+        });
+        const prompt = fixture.server.queue.submit("claude non text");
+
+        await waitUntil(() => fixture.server.db.readPrompt(prompt.id)?.response === "Only text");
+        const during = fixture.server.db.readPrompt(prompt.id);
+
+        fixture.runner.release(0, "Only text", "diagnostic");
+        await fixture.server.queue.drain();
+        const done = fixture.server.db.readPrompt(prompt.id);
+        await fixture.server.close();
+
+        return {
+            during: during?.response,
+            done: done?.response
+        };
+    }, P.equals({
+        during: "Only text",
+        done: "Only text"
+    }))
     .assert("§5.5 events mode appends Codex agent_message text", async () => {
         const fixture = await startServerFixture([{
             behavior: "resolve",
@@ -193,4 +233,3 @@ export default CTGTest.init("response")
         cleanupTempDatabases();
         return true;
     }, P.isTrue());
-

@@ -1,6 +1,6 @@
 // Dependencies:
 import CTGTest, { CTGTestPredicates as P } from "ctg-js-test"; // Pipeline test API and predicates
-import { LLMRunnerError } from "ctg-ai-agent-proc";            // Real upstream typed runner error used for RUNNER outcomes
+import { ClaudeRunnerEvent, LLMRunnerError } from "ctg-ai-agent-proc"; // Real upstream stream and typed error classes
 import { CTGPromptServerError } from "../../src/index.ts";     // Public typed errors thrown by queue operations
 import {
     allEvents,                                          // Reads durable event histories through public DB
@@ -35,7 +35,7 @@ export default CTGTest.init("queue")
 
         return result;
     }, P.isTrue())
-    .assert("§5.1/D4 submit stores and executes byte-identical untrimmed prompt text", async () => {
+    .assert("§5.1/§5.4/D1/D4 submit stores and executes byte-identical untrimmed prompt text with exact run config", async () => {
         const text = "  keep\nbytes  ";
         const fixture = await startServerFixture([{
             behavior: "resolve",
@@ -55,12 +55,14 @@ export default CTGTest.init("queue")
         return {
             stored: submitted.prompt,
             read: record?.prompt,
-            called: fixture.runner.calls[0]?.prompt
+            called: fixture.runner.calls[0]?.prompt,
+            violations: fixture.runner.violations
         };
     }, P.equals({
         stored: "  keep\nbytes  ",
         read: "  keep\nbytes  ",
-        called: "  keep\nbytes  "
+        called: "  keep\nbytes  ",
+        violations: []
     }))
     .assert("§5.3 step 2/D7 dispatch never exceeds concurrency and leaves later prompts pending", async () => {
         const fixture = await startServerFixture([
@@ -259,6 +261,86 @@ export default CTGTest.init("queue")
             && payload !== null
             && "errorType" in payload
             && payload.errorType === "SERVER";
+    }))
+    .assert("§7.2/§5.4 step 6 appendEvent throws mid-run records SERVER outcome and run continues", async () => {
+        const fixture = await startServerFixture([{
+            behavior: "block",
+            expectedPrompt: "stream store fails",
+            events: [new ClaudeRunnerEvent("ClaudeRunner", {
+                type: "assistant",
+                message: {
+                    content: [{ type: "text", text: "partial" }]
+                }
+            })]
+        }], {
+            database: tempDatabasePath("queue-server-stream-outcome")
+        });
+        const db = fixture.server.db as unknown as {
+            appendEvent(id: number, name: string, payload: unknown, appendResponse?: string): unknown;
+        };
+        const appendEvent = db.appendEvent.bind(fixture.server.db);
+        let thrown = false;
+
+        db.appendEvent = (id: number, name: string, payload: unknown, appendResponse?: string): unknown => {
+            if (!thrown && name === "stream") {
+                thrown = true;
+                throw new CTGPromptServerError("STORE_FAILED", "stream append failed");
+            }
+
+            return appendEvent(id, name, payload, appendResponse);
+        };
+
+        const prompt = fixture.server.queue.submit("stream store fails");
+
+        await waitUntil(() => fixture.runner.calls.length === 1
+            && fixture.server.db.readPrompt(prompt.id)?.status === "active");
+        const activeBeforeRelease = fixture.server.db.readPrompt(prompt.id)?.status;
+
+        fixture.runner.release(0, "partial");
+        await fixture.server.queue.drain();
+
+        const record = fixture.server.db.readPrompt(prompt.id);
+        const error = allEvents(fixture.server.db, prompt.id).at(-1);
+
+        await fixture.server.close();
+
+        return {
+            threw: thrown,
+            activeBeforeRelease,
+            calls: fixture.runner.calls.length,
+            status: record?.status,
+            errorType: record?.errorType,
+            eventName: error?.name,
+            payload: error?.payload
+        };
+    }, P.satisfies((value) => {
+        if (!isObject(value) || !("payload" in value)) {
+            return false;
+        }
+
+        const row = value as {
+            threw?: unknown;
+            activeBeforeRelease?: unknown;
+            calls?: unknown;
+            status?: unknown;
+            errorType?: unknown;
+            eventName?: unknown;
+            payload?: unknown;
+        };
+        const payload = row.payload;
+
+        return row.threw === true
+            && row.activeBeforeRelease === "active"
+            && row.calls === 1
+            && row.status === "error"
+            && row.errorType === "SERVER"
+            && row.eventName === "error"
+            && typeof payload === "object"
+            && payload !== null
+            && "errorType" in payload
+            && payload.errorType === "SERVER"
+            && "message" in payload
+            && payload.message === "stream append failed";
     }))
     .assert("§5.2/D6 cancel only pending prompts and prevents later dispatch", async () => {
         const fixture = await startServerFixture([

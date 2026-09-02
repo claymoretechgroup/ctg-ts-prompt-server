@@ -236,7 +236,7 @@ export default CTGTest.init("sse")
         comment: "keep-alive",
         raw: ": keep-alive\n\n"
     }))
-    .assert("§7.3 client disconnect deregisters stream without changing prompt outcome", async () => {
+    .assert("§7.3 client disconnect does not disturb the prompt outcome or the server", async () => {
         const fixture = await startServerFixture([{
             behavior: "block",
             expectedPrompt: "disconnect"
@@ -260,12 +260,27 @@ export default CTGTest.init("sse")
         fixture.runner.release(0, "done");
         await fixture.server.queue.drain();
         const record = fixture.server.db.readPrompt(prompt.id);
+
+        const secondClient = EventStreamClient.init({
+            port: fixture.port,
+            apiKey: API_KEY
+        });
+
+        await secondClient.open(prompt.id);
+        const frames = await secondClient.waitForEnd();
         await fixture.server.close();
 
-        return record?.status;
-    }, P.equals("done"))
+        return {
+            status: record?.status,
+            names: frames.map((frame) => frame.name),
+            ids: frames.map((frame) => frame.id)
+        };
+    }, P.equals({
+        status: "done",
+        names: ["pending", "active", "done"],
+        ids: [1, 2, 3]
+    }))
     .assert("§11 cleanup temp databases", () => {
         cleanupTempDatabases();
         return true;
     }, P.isTrue());
-

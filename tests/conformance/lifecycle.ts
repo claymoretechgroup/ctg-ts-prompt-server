@@ -8,7 +8,6 @@ import {
     cleanupTempDatabases,                               // Removes suite temp DB directories
     httpRequest,                                        // Probes started and closed HTTP listeners
     outputEvent,                                        // Real upstream output event for scripted success
-    reservePort,                                        // Gets an ephemeral loopback port for start()
     startServerFixture,                                 // Starts a server with FakeRunner
     tempDatabasePath,                                   // Creates hermetic database files
     FakeRunner,                                         // Scripted runner used to prove init does not invoke run()
@@ -16,7 +15,7 @@ import {
 } from "./helpers.ts";
 
 export default CTGTest.init("lifecycle")
-    .assert("§4.1/D2 init opens database but does not construct runner, recover, dispatch, or bind", () => {
+    .assert("§4.1 init opens database but does not construct runner, recover, dispatch, or bind", () => {
         const path = tempDatabasePath("lifecycle-init");
         const db = CTGPromptDB.init({ path });
         const inserted = db.insertPrompt("left pending before server init");
@@ -44,6 +43,7 @@ export default CTGTest.init("lifecycle")
         server.db.close();
 
         return pending?.status === "pending"
+            && server instanceof TestPromptServer
             && fake.calls.length === 0
             && CTGPromptServerError.is(queueCaught)
             && queueCaught.type === "INTERNAL_ERROR";
@@ -90,7 +90,7 @@ export default CTGTest.init("lifecycle")
             database: tempDatabasePath("lifecycle-start-twice")
         });
         const caught = await captureRejected(async () => {
-            await fixture.server.start(await reservePort());
+            await fixture.server.start(0);
         });
 
         await fixture.server.close();
@@ -110,7 +110,7 @@ export default CTGTest.init("lifecycle")
             database: tempDatabasePath("lifecycle-runner-error")
         });
         const caught = await captureRejected(async () => {
-            await server.start(await reservePort());
+            await server.start(0);
         });
 
         server.db.close();
