@@ -201,6 +201,70 @@ export default CTGTest.init("queue")
             && "errorType" in payload
             && payload.errorType === "RUNNER";
     }))
+    .assert("§5.4 step 6 runner-error outcome write failure falls back to SERVER", async () => {
+        const fixture = await startServerFixture([{
+            behavior: "reject",
+            expectedPrompt: "runner error then store fails",
+            error: new LLMRunnerError("COMMAND_FAILED", "runner failed before outcome write", {
+                exitCode: 3
+            })
+        }], {
+            database: tempDatabasePath("queue-runner-outcome-write-fallback")
+        });
+        const db = fixture.server.db as unknown as {
+            finishPrompt(id: number, outcome: unknown): unknown;
+        };
+        const finishPrompt = db.finishPrompt.bind(fixture.server.db);
+        let thrown = false;
+
+        db.finishPrompt = (id: number, outcome: unknown): unknown => {
+            if (!thrown) {
+                thrown = true;
+                throw new CTGPromptServerError("STORE_FAILED", "runner outcome write failed");
+            }
+
+            return finishPrompt(id, outcome);
+        };
+
+        const prompt = fixture.server.queue.submit("runner error then store fails");
+
+        await fixture.server.queue.drain();
+
+        const record = fixture.server.db.readPrompt(prompt.id);
+        const error = allEvents(fixture.server.db, prompt.id).at(-1);
+
+        await fixture.server.close();
+
+        return {
+            threw: thrown,
+            status: record?.status,
+            errorType: record?.errorType,
+            eventName: error?.name,
+            payload: error?.payload
+        };
+    }, P.satisfies((value) => {
+        if (!isObject(value) || !("payload" in value)) {
+            return false;
+        }
+
+        const row = value as {
+            threw?: unknown;
+            status?: unknown;
+            errorType?: unknown;
+            eventName?: unknown;
+            payload?: unknown;
+        };
+        const payload = row.payload;
+
+        return row.threw === true
+            && row.status === "error"
+            && row.errorType === "SERVER"
+            && row.eventName === "error"
+            && typeof payload === "object"
+            && payload !== null
+            && "errorType" in payload
+            && payload.errorType === "SERVER";
+    }))
     .assert("§9.2 SERVER outcome records error_type and error event payload when DB outcome write throws once", async () => {
         const fixture = await startServerFixture([{
             behavior: "block",

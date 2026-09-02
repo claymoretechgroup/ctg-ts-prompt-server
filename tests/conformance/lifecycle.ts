@@ -1,17 +1,20 @@
 // Dependencies:
 import CTGTest, { CTGTestPredicates as P } from "ctg-js-test"; // Pipeline test API and predicates
 import { CTGPromptDB, CTGPromptServerError } from "../../src/index.ts"; // Public DB and typed server errors under test
+import EventStreamClient from "./eventStreamClient.ts";         // Loopback SSE client used to prove close() ends streams
 import {
     API_KEY,                                            // Shared route key for authenticated probe requests
     captureRejected,                                    // Captures start() failures
     captureThrown,                                      // Captures pre-start queue getter failure
     cleanupTempDatabases,                               // Removes suite temp DB directories
+    delay,                                              // Short timeout primitive for prompt close() assertions
     httpRequest,                                        // Probes started and closed HTTP listeners
     outputEvent,                                        // Real upstream output event for scripted success
     startServerFixture,                                 // Starts a server with FakeRunner
     tempDatabasePath,                                   // Creates hermetic database files
     FakeRunner,                                         // Scripted runner used to prove init does not invoke run()
-    TestPromptServer                                    // Server subclass that injects FakeRunner
+    TestPromptServer,                                   // Server subclass that injects FakeRunner
+    waitUntil                                           // Waits until the held prompt is active before SSE attach
 } from "./helpers.ts";
 
 export default CTGTest.init("lifecycle")
@@ -139,6 +142,53 @@ export default CTGTest.init("lifecycle")
 
         return caught instanceof Error;
     }, P.isTrue())
+    .assert("§4.4 close ends open SSE streams before waiting on listener", async () => {
+        const fixture = await startServerFixture([{
+            behavior: "block",
+            expectedPrompt: "stream held open"
+        }], {
+            database: tempDatabasePath("lifecycle-close-sse")
+        });
+        const prompt = fixture.server.queue.submit("stream held open");
+
+        await waitUntil(() => fixture.server.db.readPrompt(prompt.id)?.status === "active");
+
+        const client = EventStreamClient.init({
+            port: fixture.port,
+            apiKey: API_KEY
+        });
+
+        await client.open(prompt.id);
+        await client.waitForFrames(2);
+
+        const startedAt = Date.now();
+        const closePromise = fixture.server.close().then(() => true);
+        const endPromise = client.waitForEnd().then(() => true);
+        const closed = await Promise.race([
+            closePromise,
+            delay(750).then(() => false)
+        ]);
+        const ended = await Promise.race([
+            endPromise,
+            delay(750).then(() => false)
+        ]);
+        const elapsedMs = Date.now() - startedAt;
+
+        if (!closed) {
+            client.close();
+            await closePromise;
+        }
+
+        return {
+            closed,
+            ended,
+            underOneSecond: elapsedMs < 1000
+        };
+    }, P.equals({
+        closed: true,
+        ended: true,
+        underOneSecond: true
+    }))
     .assert("§11 cleanup temp databases", () => {
         cleanupTempDatabases();
         return true;

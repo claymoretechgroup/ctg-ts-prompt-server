@@ -1,6 +1,7 @@
 // Dependencies:
 import crypto from "node:crypto";                                  // Timing-safe bearer key comparison
-import { type AddressInfo, type Server } from "node:net";           // Bound socket address and listener handle
+import type { Server } from "node:http";                            // HTTP listener handle with connection close helpers
+import type { AddressInfo } from "node:net";                        // Bound socket address returned by the listener
 import express from "express";                                     // HTTP routing and response host
 import { ClaudeRunner, CodexRunner } from "ctg-ai-agent-proc";      // Configured concrete runner classes
 import CTGPromptDB from "../CTGPromptDB/CTGPromptDB.js";            // Durable prompt database
@@ -52,6 +53,9 @@ interface ResolvedServerConfig {
 
 // HTTP entry point for the durable prompt service.
 export default class CTGPromptServer {
+
+    /* Static Fields */
+    static readonly BODY_LIMIT_BYTES = 1048576;                      // Fixed JSON reader limit required by §8.1
 
     /* Instance Fields */
     private readonly _config: ResolvedServerConfig;                    // Resolved construction config
@@ -173,7 +177,7 @@ export default class CTGPromptServer {
         const listener = this._listener;
 
         if (listener !== null && listener.listening) {
-            await new Promise<void>((resolve, reject) => {
+            const closed = new Promise<void>((resolve, reject) => {
                 listener.close((error?: Error) => {
                     if (error !== undefined) {
                         reject(error);
@@ -183,9 +187,14 @@ export default class CTGPromptServer {
                     resolve();
                 });
             });
+
+            this._subscribers.closeAll();
+            listener.closeAllConnections();
+            await closed;
+        } else {
+            this._subscribers.closeAll();
         }
 
-        this._subscribers.closeAll();
         this._db.close();
         this._listener = null;
     }
@@ -232,7 +241,9 @@ export default class CTGPromptServer {
             }
         });
 
-        app.post("/prompt", this._requireJson.bind(this), express.json(), this._asyncRoute(async (req, res) => {
+        app.post("/prompt", this._requireJson.bind(this), express.json({
+            limit: CTGPromptServer.BODY_LIMIT_BYTES
+        }), this._asyncRoute(async (req, res) => {
             if (!CTGPromptServer._isObject(req.body) || Array.isArray(req.body) || !("prompt" in req.body)) {
                 throw new CTGPromptServerError("INVALID_BODY", "Body must be a JSON object with a prompt property.");
             }
@@ -448,6 +459,16 @@ export default class CTGPromptServer {
                 return;
             }
 
+            const bodyError = CTGPromptServer._bodyReaderError(err);
+
+            if (bodyError !== null) {
+                res.status(bodyError.status ?? 400).json({
+                    success: false,
+                    result: bodyError.toResult()
+                });
+                return;
+            }
+
             const error = new CTGPromptServerError("INTERNAL_ERROR", "Internal error.");
 
             res.status(500).json({
@@ -575,6 +596,23 @@ export default class CTGPromptServer {
     // Narrows object values.
     private static _isObject(value: unknown): value is Record<string, unknown> {
         return typeof value === "object" && value !== null;
+    }
+
+    // METHOD :: UNKNOWN -> ctgPromptServerError?
+    // Maps Express JSON reader failures to INVALID_BODY.
+    private static _bodyReaderError(value: unknown): CTGPromptServerError | null {
+        if (!CTGPromptServer._isObject(value) || typeof value.type !== "string") {
+            return null;
+        }
+
+        if (value.type === "entity.parse.failed") {
+            return new CTGPromptServerError("INVALID_BODY", "Body must parse as JSON.");
+        }
+        if (value.type === "entity.too.large") {
+            return new CTGPromptServerError("INVALID_BODY", `Body exceeds the maximum of ${CTGPromptServer.BODY_LIMIT_BYTES.toLocaleString("en-US")} bytes.`);
+        }
+
+        return null;
     }
 
     // METHOD :: STRING|[STRING]? -> STRING?

@@ -291,7 +291,11 @@ export default class CTGPromptQueue {
                 onStream
             });
         } catch (caught) {
-            this._finishRunnerError(prompt.id, caught);
+            try {
+                this._finishRunnerError(prompt.id, caught);
+            } catch (finishCaught) {
+                this._finishServerError(prompt.id, finishCaught);
+            }
             return;
         }
 

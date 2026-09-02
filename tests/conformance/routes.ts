@@ -6,6 +6,7 @@ import {
     cleanupTempDatabases,                           // Removes suite temp DB directories
     httpRequest,                                    // Exercises the public HTTP surface over loopback
     isErrorEnvelope,                                // Verifies exact §8.3 error envelope and status
+    isObject,                                       // Narrows parsed response bodies for message assertions
     promptListResult,                               // Extracts and exact-key-checks prompt list envelopes
     promptResult,                                   // Extracts and exact-key-checks prompt record envelopes
     startServerFixture,                             // Starts server fixtures with FakeRunner
@@ -78,6 +79,91 @@ export default CTGTest.init("routes")
         await fixture.server.close();
 
         return isErrorEnvelope(response, "INVALID_BODY", 400);
+    }, P.isTrue())
+    .assert("§8.1/§9.1 INVALID_BODY malformed JSON returns 400", async () => {
+        const fixture = await startServerFixture([], {
+            database: tempDatabasePath("routes-malformed-json")
+        });
+        const response = await httpRequest({
+            method: "POST",
+            path: "/prompt",
+            port: fixture.port,
+            apiKey: API_KEY,
+            contentType: "application/json",
+            body: "{not json"
+        });
+
+        await fixture.server.close();
+
+        return isErrorEnvelope(response, "INVALID_BODY", 400);
+    }, P.isTrue())
+    .assert("§8.1 body reader admits max legal prompt and stores it byte-identical", async () => {
+        const prompt = "a".repeat(131071);
+        const fixture = await startServerFixture([{
+            behavior: "block",
+            expectedPrompt: prompt
+        }], {
+            database: tempDatabasePath("routes-max-legal-prompt")
+        });
+        const response = await httpRequest({
+            method: "POST",
+            path: "/prompt",
+            port: fixture.port,
+            apiKey: API_KEY,
+            contentType: "application/json",
+            body: {
+                prompt
+            }
+        });
+        const record = promptResult(response);
+        const stored = record === null ? undefined : fixture.server.db.readPrompt(record.id);
+
+        await fixture.server.close();
+
+        return response.status === 202
+            && record?.prompt === prompt
+            && stored?.prompt === prompt
+            && Buffer.compare(Buffer.from(stored.prompt, "utf8"), Buffer.from(prompt, "utf8")) === 0;
+    }, P.isTrue())
+    .assert("§8.1 maxPromptBytes rejects 131072-byte prompt as INVALID_PROMPT, not body-reader failure", async () => {
+        const fixture = await startServerFixture([], {
+            database: tempDatabasePath("routes-prompt-over-max")
+        });
+        const response = await httpRequest({
+            method: "POST",
+            path: "/prompt",
+            port: fixture.port,
+            apiKey: API_KEY,
+            contentType: "application/json",
+            body: {
+                prompt: "a".repeat(131072)
+            }
+        });
+
+        await fixture.server.close();
+
+        return isErrorEnvelope(response, "INVALID_PROMPT", 400);
+    }, P.isTrue())
+    .assert("§8.1/§9.1 INVALID_BODY body over fixed 1 MiB reader limit returns 400 naming limit", async () => {
+        const fixture = await startServerFixture([], {
+            database: tempDatabasePath("routes-body-over-limit")
+        });
+        const response = await httpRequest({
+            method: "POST",
+            path: "/prompt",
+            port: fixture.port,
+            apiKey: API_KEY,
+            contentType: "application/json",
+            body: `{"prompt":"${"a".repeat(1048577)}"}`
+        });
+        const body = response.body;
+        const result = isObject(body) && isObject(body.result) ? body.result : null;
+
+        await fixture.server.close();
+
+        return isErrorEnvelope(response, "INVALID_BODY", 400)
+            && typeof result?.message === "string"
+            && result.message.includes("1,048,576");
     }, P.isTrue())
     .assert("§5.1/§9.1 INVALID_PROMPT whitespace body prompt returns 400", async () => {
         const fixture = await startServerFixture([], {

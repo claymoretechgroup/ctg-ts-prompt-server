@@ -7,8 +7,8 @@ This checklist maps the spec's mandatory coverage rows to suite files and case l
 | §9.1 `INVALID_CONFIG`, status `null` | `conformance/errorClass.ts` — `§9.1/§9.2 statusOf matches HTTP status and null outcome status`; `conformance/config.ts` — `§4.1 every invalid config check throws INVALID_CONFIG` |
 | §9.1 `UNAUTHORIZED`, HTTP 401 | `conformance/routes.ts` — `§8.2/§9.1 UNAUTHORIZED missing bearer key returns 401` |
 | §9.1 `INVALID_CONTENT_TYPE`, HTTP 415 | `conformance/routes.ts` — `§8.1/§9.1 INVALID_CONTENT_TYPE POST /prompt without JSON returns 415` |
-| §9.1 `INVALID_BODY`, HTTP 400 | `conformance/routes.ts` — `§8.1/§9.1 INVALID_BODY non-object or missing prompt returns 400` |
-| §9.1 `INVALID_PROMPT`, HTTP 400 | `conformance/routes.ts` — `§5.1/§9.1 INVALID_PROMPT whitespace body prompt returns 400` |
+| §9.1 `INVALID_BODY`, HTTP 400 | `conformance/routes.ts` — `§8.1/§9.1 INVALID_BODY non-object or missing prompt returns 400` covers missing `prompt`; `conformance/routes.ts` — `§8.1/§9.1 INVALID_BODY malformed JSON returns 400`; `conformance/routes.ts` — `§8.1/§9.1 INVALID_BODY body over fixed 1 MiB reader limit returns 400 naming limit` |
+| §9.1 `INVALID_PROMPT`, HTTP 400 | `conformance/routes.ts` — `§5.1/§9.1 INVALID_PROMPT whitespace body prompt returns 400`; `conformance/routes.ts` — `§8.1 maxPromptBytes rejects 131072-byte prompt as INVALID_PROMPT, not body-reader failure` |
 | §9.1 `INVALID_QUERY`, HTTP 400 | `conformance/routes.ts` — `§8.1 detection order/§9.1 INVALID_QUERY covers bad id, status, limit, before, and wait before lookup` |
 | §9.1 `PROMPT_NOT_FOUND`, HTTP 404 | `conformance/routes.ts` — `§8.1/§9.1 PROMPT_NOT_FOUND read returns 404`; `conformance/sse.ts` — `§7.3 boundary unknown id returns 404 JSON envelope and no SSE stream` |
 | §9.1 `CANCEL_NOT_ALLOWED`, HTTP 409 | `conformance/routes.ts` — `§5.2/§9.1 CANCEL_NOT_ALLOWED active prompt DELETE returns 409` |
@@ -45,6 +45,15 @@ This checklist maps the spec's mandatory coverage rows to suite files and case l
 | D8 prompt size validation and retention/purge | `conformance/config.ts` — `§4.1 every invalid config check throws INVALID_CONFIG`; `conformance/purge.ts` — `§6.6/R13 purgeFinished deletes done/error/cancelled rows and cascades their events` |
 | D9 no operational logging in v1 | Spec-only absence in §10; no conformance case is cited because the service exposes no public logging surface. |
 | D10 shared API key in a request header on every route | `conformance/config.ts` — `§4.1 every invalid config check throws INVALID_CONFIG` includes missing `apiKey`; `conformance/routes.ts` — `§8.2/§9.1 UNAUTHORIZED missing bearer key returns 401` |
+
+Review finding regressions:
+
+| Finding | Covered by |
+|---|---|
+| 1 malformed JSON maps to `INVALID_BODY` | `conformance/routes.ts` — `§8.1/§9.1 INVALID_BODY malformed JSON returns 400` |
+| 2 legal prompt/body reader boundaries | `conformance/routes.ts` — `§8.1 body reader admits max legal prompt and stores it byte-identical`; `conformance/routes.ts` — `§8.1 maxPromptBytes rejects 131072-byte prompt as INVALID_PROMPT, not body-reader failure`; `conformance/routes.ts` — `§8.1/§9.1 INVALID_BODY body over fixed 1 MiB reader limit returns 400 naming limit` |
+| 3 `close()` ends SSE before waiting on listener | `conformance/lifecycle.ts` — `§4.4 close ends open SSE streams before waiting on listener` |
+| 4 runner-error outcome write fallback | `conformance/queue.ts` — `§5.4 step 6 runner-error outcome write failure falls back to SERVER` |
 
 Additional exact wire/body shape checks:
 
