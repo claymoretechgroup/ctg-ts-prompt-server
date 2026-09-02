@@ -1,0 +1,54 @@
+{
+  "name": "ctg-ts-prompt-server",
+  "version": "1.0.0",
+  "description": "A durable prompt service exposing one LLM runner over HTTP, SQLite, and Server-Sent Events",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "clean": "node scripts/clean-dist.mjs",
+    "compile": "tsc",
+    "compile:package": "tsc -p tsconfig.package.json",
+    "build": "run-s clean compile",
+    "build:package": "run-s clean compile:package",
+    "prepare": "npm run build:package",
+    "test": "tsx tests/test.ts",
+    "start": "tsx scripts/start.ts",
+    "purge-finished": "tsx scripts/purge-finished.ts",
+    "watch": "tsx watch tests/test.ts"
+  },
+  "keywords": [],
+  "author": "claymoretechgroup",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/claymoretechgroup/ctg-ts-prompt-server.git"
+  },
+  "homepage": "https://github.com/claymoretechgroup/ctg-ts-prompt-server#readme",
+  "bugs": "https://github.com/claymoretechgroup/ctg-ts-prompt-server/issues",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "ctg-js-test": "github:claymoretechgroup/ctg-js-test#v4.0.0",
+    "npm-run-all": "^4.1.5",
+    "tsx": "^4.23.11",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "ctg-ai-agent-proc": "github:claymoretechgroup/ctg-ai-agent-proc#2de1b44",
+    "express": "^5.1.0"
+  }
+}
