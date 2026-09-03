@@ -29,13 +29,14 @@ import type {
  *
  */
 
-// TYPE :: {runner:ctgPromptRunnerConfig, apiKey:STRING, host:STRING, database:STRING, concurrency:NUMBER, maxPromptBytes:NUMBER, streamMode:streamMode, keepAliveMs:NUMBER, maxWaitMs:NUMBER, defaultLimit:NUMBER, maxLimit:NUMBER}
+// TYPE :: {runner:ctgPromptRunnerConfig, apiKey:STRING, host:STRING, database:STRING, initDB:BOOLEAN, concurrency:NUMBER, maxPromptBytes:NUMBER, streamMode:streamMode, keepAliveMs:NUMBER, maxWaitMs:NUMBER, defaultLimit:NUMBER, maxLimit:NUMBER}
 // Fully resolved server config.
 interface ResolvedServerConfig {
     readonly runner: CTGPromptRunnerConfig;                            // Validated runner config
     readonly apiKey: string;                                           // Shared bearer key
     readonly host: string;                                             // Bind address
     readonly database: string;                                         // SQLite path
+    readonly initDB: boolean;                                          // Whether DB schema creation is allowed
     readonly concurrency: number;                                      // Run concurrency
     readonly maxPromptBytes: number;                                  // Prompt byte ceiling
     readonly streamMode: StreamMode;                                  // Runner stream mode
@@ -71,7 +72,8 @@ export default class CTGPromptServer {
     protected constructor(config: ResolvedServerConfig) {
         this._config = config;
         this._db = CTGPromptDB.init({
-            path: config.database
+            path: config.database,
+            initDB: config.initDB
         });
         this._subscribers = CTGPromptSubscribers.init();
         this._queue = null;
@@ -525,6 +527,7 @@ export default class CTGPromptServer {
                 apiKey,
                 host: config.host === undefined ? "127.0.0.1" : CTGPromptServer._nonEmptyString(config.host, "host"),
                 database: config.database === undefined ? "prompts.db" : CTGPromptServer._nonEmptyString(config.database, "database"),
+                initDB: CTGPromptServer._optionalBoolean(config.initDB, "initDB") ?? true,
                 concurrency: CTGPromptServer._optionalInteger(config.concurrency, "concurrency", 1, undefined) ?? 1,
                 maxPromptBytes: CTGPromptServer._optionalInteger(config.maxPromptBytes, "maxPromptBytes", 1, 131071) ?? 131071,
                 streamMode: CTGPromptServer._resolveStreamMode(config.streamMode),
@@ -649,6 +652,19 @@ export default class CTGPromptServer {
         }
 
         return value as NodeJS.ProcessEnv;
+    }
+
+    // METHOD :: UNKNOWN, STRING -> BOOLEAN?
+    // Validates an optional boolean.
+    private static _optionalBoolean(value: unknown, label: string): boolean | undefined {
+        if (value === undefined) {
+            return undefined;
+        }
+        if (typeof value !== "boolean") {
+            throw new Error(`${label} must be a boolean.`);
+        }
+
+        return value;
     }
 
     // METHOD :: UNKNOWN, STRING, NUMBER, NUMBER? -> NUMBER?

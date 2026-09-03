@@ -92,8 +92,61 @@ export default CTGTest.init("purge")
 
         return second.id > first.id;
     }, P.isTrue())
+    .assert("§6.6 purgeAll works through a second file connection like the purge-all script", () => {
+        const path = tempDatabasePath("purge-all-script");
+        const primary = CTGPromptDB.init({ path });
+        const active = primary.insertPrompt("active");
+        const pending = primary.insertPrompt("pending");
+
+        primary.claimNextPending("claude");
+
+        const scriptDB = CTGPromptDB.init({ path });
+        const removed = scriptDB.purgeAll();
+
+        scriptDB.close();
+
+        const rows = [active, pending].map((prompt) => primary.readPrompt(prompt.id));
+        const eventCounts = [active, pending].map((prompt) => allEvents(primary, prompt.id).length);
+
+        primary.close();
+
+        return {
+            removed,
+            rows,
+            eventCounts
+        };
+    }, P.equals({
+        removed: 2,
+        rows: [undefined, undefined],
+        eventCounts: [0, 0]
+    }))
+    .assert("§6.6 reset works through a second file connection like the reset-everything script", () => {
+        const path = tempDatabasePath("reset-everything-script");
+        const primary = CTGPromptDB.init({ path });
+
+        primary.insertPrompt("before reset");
+
+        const scriptDB = CTGPromptDB.init({ path });
+
+        scriptDB.reset();
+        scriptDB.close();
+
+        const after = primary.insertPrompt("after reset");
+        const prompts = primary.listPrompts({
+            limit: 10
+        }).prompts.map((prompt) => prompt.id);
+
+        primary.close();
+
+        return {
+            afterId: after.id,
+            prompts
+        };
+    }, P.equals({
+        afterId: 1,
+        prompts: [1]
+    }))
     .assert("§11 cleanup temp databases", () => {
         cleanupTempDatabases();
         return true;
     }, P.isTrue());
-

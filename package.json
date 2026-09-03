@@ -12,7 +12,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "schema.sql"
   ],
   "scripts": {
     "check": "tsc --noEmit",
@@ -25,6 +26,8 @@
     "test": "tsx tests/test.ts",
     "start": "tsx scripts/start.ts",
     "purge-finished": "tsx scripts/purge-finished.ts",
+    "purge-all": "tsx scripts/purge-all.ts",
+    "reset-everything": "tsx scripts/reset-everything.ts",
     "watch": "tsx watch tests/test.ts"
   },
   "keywords": [],

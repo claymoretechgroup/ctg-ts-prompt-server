@@ -30,6 +30,7 @@ interface CTGPromptServerConfig {
     apiKey: string;
     host?: string;
     database?: string;
+    initDB?: boolean;
     concurrency?: number;
     maxPromptBytes?: number;
     streamMode?: "raw" | "events";
@@ -41,12 +42,15 @@ interface CTGPromptServerConfig {
 ```
 
 Defaults: `host` is `127.0.0.1`, `database` is `prompts.db`,
-`concurrency` is `1`, `maxPromptBytes` is `131071`, `streamMode` is
-`events`, `keepAliveMs` is `15000`, `maxWaitMs` is `30000`,
-`defaultLimit` is `50`, and `maxLimit` is `200`.
+`initDB` is `true`, `concurrency` is `1`, `maxPromptBytes` is `131071`,
+`streamMode` is `events`, `keepAliveMs` is `15000`, `maxWaitMs` is
+`30000`, `defaultLimit` is `50`, and `maxLimit` is `200`.
 
 `runner.env` is a complete replacement for the child environment. Omit
 it to let the runner inherit the server process environment.
+
+The SQLite schema lives in [`schema.sql`](./schema.sql) at the project
+root.
 
 ## Run
 
@@ -116,11 +120,23 @@ curl \
 The response is `200` whether the prompt finished or the wait elapsed.
 Read `result.status` and `result.response`.
 
-## Purge
+## Operations
 
 ```sh
 PROMPT_SERVER_DB=prompts.db npm run purge-finished
 ```
 
-The purge command deletes finished prompts and their events, prints the
-deleted prompt count, and leaves `pending` and `active` prompts intact.
+| Script | Method | Deletes | Touches `pending` / `active` |
+|---|---|---|---|
+| `purge-finished` | `purgeFinished()` | `done`, `error`, `cancelled` rows and their events | no |
+| `purge-all` | `purgeAll()` | every prompt and every event | **yes** — empties the queue |
+| `reset-everything` | `reset()` | drops `events`, `prompts`, and the index, then applies `schema.sql` | **yes** — and the id sequence restarts at 1 |
+
+Each command uses `PROMPT_SERVER_DB`, defaulting to `prompts.db`, prints
+the deleted prompt count or `reset`, and closes the database.
+
+**`purge-all` and `reset-everything` are for a stopped server.** They
+cannot tell whether a server holds the file. Run against a live one, an
+active prompt's next event append finds no row and the run ends as a
+`SERVER` outcome (§5.4 step 6), and recovery on the next `start` has
+nothing to recover.

@@ -37,7 +37,8 @@ const invalidRows: ReadonlyArray<readonly [string, unknown]> = [
     ["§4.1 step 7 defaultLimit greater than maxLimit", { ...validConfig(), defaultLimit: 20, maxLimit: 10 }],
     ["§4.1 step 8 streamMode invalid", { ...validConfig(), streamMode: "json" }],
     ["§4.1 step 9 host empty", { ...validConfig(), host: "" }],
-    ["§4.1 step 10 database empty", { ...validConfig(), database: "" }]
+    ["§4.1 step 10 database empty", { ...validConfig(), database: "" }],
+    ["§4.1 step 10 initDB non-boolean", { ...validConfig(), initDB: "yes" }]
 ] as const;
 
 export default CTGTest.init("config")
@@ -62,6 +63,19 @@ export default CTGTest.init("config")
         return CTGPromptServerError.is(caught)
             && caught.type === "INTERNAL_ERROR"
             && caught.msg === "Server has not been started.";
+    }, P.isTrue())
+    .assert("§4.1 step 11 initDB false with fresh database path throws INVALID_CONFIG", () => {
+        const caught = captureThrown(() => {
+            CTGPromptServer.init({
+                ...validConfig(),
+                database: tempDatabasePath("config-init-false-fresh"),
+                initDB: false
+            });
+        });
+
+        return CTGPromptServerError.is(caught)
+            && caught.type === "INVALID_CONFIG"
+            && caught.msg.includes("reset-everything");
     }, P.isTrue())
     .assert("§3.2/§5.4 streamMode defaults to events on runner.run without contract violations", async () => {
         const fixture = await startServerFixture([{

@@ -1,4 +1,5 @@
 // Dependencies:
+import { readFileSync } from "node:fs";                      // Loads the package root schema.sql at database open/reset
 import { DatabaseSync } from "node:sqlite";                 // Synchronous SQLite database required by the spec
 import CTGPromptServerError from "../CTGPromptServerError/CTGPromptServerError.js"; // Typed storage errors
 
@@ -51,6 +52,12 @@ interface EventRow {
     readonly created_at: unknown;                            // Event timestamp
 }
 
+// TYPE :: ARRAY<STRING, UNKNOWN>
+// Raw sqlite_master row used to check for an initialized database.
+interface SchemaRow {
+    readonly name: unknown;                                  // Schema object name
+}
+
 /**
  *
  * Class
@@ -64,13 +71,13 @@ export default class CTGPromptDB {
     private readonly _db: DatabaseSync;                       // Underlying SQLite connection
 
     // CONSTRUCTOR :: ctgPromptDBConfig -> this
-    // Opens the SQLite database and creates the required schema.
+    // Opens the SQLite database and creates or verifies the required schema.
     private constructor(config: CTGPromptDBConfig) {
         this._db = new DatabaseSync(config.path);
         this._db.exec("PRAGMA journal_mode = WAL;");
         this._db.exec("PRAGMA foreign_keys = ON;");
         this._db.exec("PRAGMA busy_timeout = 5000;");
-        this._createSchema();
+        this._openSchema(config.initDB ?? true);
     }
 
     /**
@@ -331,6 +338,28 @@ export default class CTGPromptDB {
         });
     }
 
+    // METHOD :: VOID -> NUMBER
+    // Deletes every prompt and cascaded event.
+    // WARNING: This empties pending and active work.
+    purgeAll(): number {
+        return this._transaction(() => {
+            const result = this._db.prepare("DELETE FROM prompts").run();
+
+            return Number(result.changes);
+        });
+    }
+
+    // METHOD :: VOID -> VOID
+    // Drops and recreates the prompt schema.
+    // WARNING: This deletes all prompt history and restarts ids.
+    reset(): void {
+        this._transaction(() => {
+            this._db.exec("DROP TABLE IF EXISTS events;");
+            this._db.exec("DROP TABLE IF EXISTS prompts;");
+            this._db.exec(CTGPromptDB._schemaSQL());
+        });
+    }
+
     // METHOD :: VOID -> VOID
     // Closes the SQLite handle.
     close(): void {
@@ -345,37 +374,30 @@ export default class CTGPromptDB {
      *
      */
 
-    // METHOD :: VOID -> VOID
-    // Creates the prompt and event tables.
-    private _createSchema(): void {
-        this._db.exec(`
-            CREATE TABLE IF NOT EXISTS prompts (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                status        TEXT    NOT NULL,
-                prompt        TEXT    NOT NULL,
-                response      TEXT    NOT NULL DEFAULT '',
-                error_type    TEXT,
-                error_message TEXT,
-                info          TEXT,
-                runner        TEXT,
-                next_sequence INTEGER NOT NULL DEFAULT 1,
-                created_at    INTEGER NOT NULL,
-                started_at    INTEGER,
-                finished_at   INTEGER
-            );
+    // METHOD :: BOOLEAN -> VOID
+    // Creates or verifies the prompt schema after pragmas are applied.
+    private _openSchema(initDB: boolean): void {
+        if (this._hasPromptsTable()) {
+            return;
+        }
+        if (initDB) {
+            this._db.exec(CTGPromptDB._schemaSQL());
+            return;
+        }
 
-            CREATE TABLE IF NOT EXISTS events (
-                prompt_id  INTEGER NOT NULL REFERENCES prompts (id) ON DELETE CASCADE,
-                sequence   INTEGER NOT NULL,
-                name       TEXT    NOT NULL,
-                payload    TEXT    NOT NULL,
-                created_at INTEGER NOT NULL,
-                PRIMARY KEY (prompt_id, sequence)
-            ) WITHOUT ROWID;
+        this.close();
+        throw new CTGPromptServerError("INVALID_CONFIG", "Database has no prompts table; run reset-everything or enable initDB.");
+    }
 
-            CREATE INDEX IF NOT EXISTS prompts_status_id
-                ON prompts (status, id);
-        `);
+    // METHOD :: VOID -> BOOLEAN
+    // Checks whether the prompts table exists.
+    private _hasPromptsTable(): boolean {
+        const row = this._db.prepare(`
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name = 'prompts'
+        `).get() as SchemaRow | undefined;
+
+        return row !== undefined;
     }
 
     // METHOD :: NUMBER, promptEventName, UNKNOWN, STRING? -> appendedEvent
@@ -453,6 +475,12 @@ export default class CTGPromptDB {
      * Private Static Methods
      *
      */
+
+    // METHOD :: VOID -> STRING
+    // Reads the package root schema SQL.
+    private static _schemaSQL(): string {
+        return readFileSync(new URL("../../schema.sql", import.meta.url), "utf8");
+    }
 
     // METHOD :: UNKNOWN -> NUMBER
     // Narrows a SQLite number field.

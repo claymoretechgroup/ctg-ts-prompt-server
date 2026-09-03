@@ -46,6 +46,16 @@ This checklist maps the spec's mandatory coverage rows to suite files and case l
 | D9 no operational logging in v1 | Spec-only absence in §10; no conformance case is cited because the service exposes no public logging surface. |
 | D10 shared API key in a request header on every route | `conformance/config.ts` — `§4.1 every invalid config check throws INVALID_CONFIG` includes missing `apiKey`; `conformance/routes.ts` — `§8.2/§9.1 UNAUTHORIZED missing bearer key returns 401` |
 
+R32 schema/init/reset coverage:
+
+| Spec row | Covered by |
+|---|---|
+| §3.2 `CTGPromptServerConfig.initDB` / `CTGPromptDBConfig.initDB` | `conformance/config.ts` — `§4.1 step 10 initDB non-boolean`; `conformance/config.ts` — `§4.1 step 11 initDB false with fresh database path throws INVALID_CONFIG`; `conformance/db.ts` — `§6.1 initDB false on a fresh file throws INVALID_CONFIG and creates no prompts table`; `conformance/db.ts` — `§6.1 initDB false on an existing schema opens without altering data` |
+| §6.1 root `schema.sql` is the schema source | `conformance/db.ts` — `§6.1 DB-created schema matches root schema.sql` |
+| §6 table `purgeAll` | `conformance/db.ts` — `§6.6 purgeAll deletes pending, active, finished prompts and every event`; `conformance/purge.ts` — `§6.6 purgeAll works through a second file connection like the purge-all script` |
+| §6 table `reset` | `conformance/db.ts` — `§6.6 reset leaves empty tables and restarts id sequence at 1`; `conformance/purge.ts` — `§6.6 reset works through a second file connection like the reset-everything script` |
+| §6.6 stopped-server scripts | `conformance/purge.ts` — `§6.6 purgeAll works through a second file connection like the purge-all script`; `conformance/purge.ts` — `§6.6 reset works through a second file connection like the reset-everything script` |
+
 Review finding regressions:
 
 | Finding | Covered by |

@@ -137,13 +137,14 @@ export interface CTGPromptRunnerConfig {
     maxBuffer?: number;                                            // Child output cap
 }
 
-// TYPE :: {runner:ctgPromptRunnerConfig, apiKey:STRING, host:STRING?, database:STRING?, concurrency:NUMBER?, maxPromptBytes:NUMBER?, streamMode:streamMode?, keepAliveMs:NUMBER?, maxWaitMs:NUMBER?, defaultLimit:NUMBER?, maxLimit:NUMBER?}
+// TYPE :: {runner:ctgPromptRunnerConfig, apiKey:STRING, host:STRING?, database:STRING?, initDB:BOOLEAN?, concurrency:NUMBER?, maxPromptBytes:NUMBER?, streamMode:streamMode?, keepAliveMs:NUMBER?, maxWaitMs:NUMBER?, defaultLimit:NUMBER?, maxLimit:NUMBER?}
 // Server config accepted by CTGPromptServer.init().
 export interface CTGPromptServerConfig {
     runner: CTGPromptRunnerConfig;                                 // Runner config
     apiKey: string;                                                // Shared bearer key
     host?: string;                                                 // Bind address
     database?: string;                                             // SQLite path
+    initDB?: boolean;                                               // Whether to create schema when absent
     concurrency?: number;                                          // Run concurrency
     maxPromptBytes?: number;                                       // Prompt byte ceiling
     streamMode?: StreamMode;                                       // Runner stream mode
@@ -168,6 +169,8 @@ export interface CTGPromptQueueConfig {
         readEvents(id: number, afterSequence: number): EventRecord[];
         lastSequence(id: number): number;
         purgeFinished(): number;
+        purgeAll(): number;
+        reset(): void;
         close(): void;
     };
     subscribers: {                                                 // Live subscriber registry
@@ -187,8 +190,9 @@ export interface CTGPromptQueueConfig {
     maxLimit: number;                                              // Maximum list size
 }
 
-// TYPE :: {path:STRING}
+// TYPE :: {path:STRING, initDB:BOOLEAN?}
 // Database config accepted by CTGPromptDB.init().
 export interface CTGPromptDBConfig {
     path: string;                                                  // SQLite file path or :memory:
+    initDB?: boolean;                                               // Whether to create schema when absent
 }

@@ -1,4 +1,5 @@
 // Dependencies:
+import { readFileSync } from "node:fs";                         // Reads root schema.sql for the R32 single-source schema check
 import { DatabaseSync } from "node:sqlite";                       // Verifies persisted schema, pragmas, and cascades as database observables
 import CTGTest, { CTGTestPredicates as P } from "ctg-js-test";    // Pipeline test API and predicates
 import { CTGPromptDB, CTGPromptServerError } from "../../src/index.ts"; // Public DB and typed errors under conformance
@@ -23,9 +24,40 @@ interface SqliteForeignKeyRow {
     readonly on_delete: string;
 }
 
+interface SqliteSchemaRow {
+    readonly name: string;
+    readonly sql: string;
+}
+
 const openDB = (label: string): CTGPromptDB => CTGPromptDB.init({
     path: tempDatabasePath(label)
 });
+
+const normalizeSql = (sql: string): string => sql.replace(/\s+/g, " ").trim();
+
+const normalizeSchemaFileSql = (sql: string): string => normalizeSql(sql)
+    .replace(/^CREATE TABLE IF NOT EXISTS /i, "CREATE TABLE ")
+    .replace(/^CREATE INDEX IF NOT EXISTS /i, "CREATE INDEX ");
+
+const schemaStatements = (): Map<string, string> => {
+    const text = readFileSync(new URL("../../schema.sql", import.meta.url), "utf8");
+    const statements = text.split(";")
+        .map((statement) => statement.trim())
+        .filter((statement) => statement !== "");
+    const result = new Map<string, string>();
+
+    for (const statement of statements) {
+        const table = /^CREATE TABLE IF NOT EXISTS ([a-z_]+)/i.exec(statement);
+        const index = /^CREATE INDEX IF NOT EXISTS ([a-z_]+)/i.exec(statement);
+        const name = table?.[1] ?? index?.[1];
+
+        if (name !== undefined) {
+            result.set(name, normalizeSchemaFileSql(statement));
+        }
+    }
+
+    return result;
+};
 
 export default CTGTest.init("db")
     .assert("§6.1 schema has prompt/event tables, status index, and foreign key cascade", () => {
@@ -285,6 +317,137 @@ export default CTGTest.init("db")
             && JSON.stringify(row.nextIds) === JSON.stringify(row.expectedNext)
             && JSON.stringify(row.cancelledIds) === JSON.stringify([row.expectedNewest[1]]);
     }))
+    .assert("§6.6 purgeAll deletes pending, active, finished prompts and every event", () => {
+        const db = openDB("db-purge-all");
+        const done = db.insertPrompt("done");
+        const error = db.insertPrompt("error");
+        const cancelled = db.insertPrompt("cancelled");
+        const active = db.insertPrompt("active");
+        const pending = db.insertPrompt("pending");
+
+        db.claimNextPending("claude");
+        db.finishPrompt(done.id, {
+            status: "done",
+            response: "done"
+        });
+        db.claimNextPending("claude");
+        db.finishPrompt(error.id, {
+            status: "error",
+            errorType: "RUNNER",
+            errorMessage: "runner failed"
+        });
+        db.cancelPending(cancelled.id);
+        db.claimNextPending("claude");
+
+        const removed = db.purgeAll();
+        const prompts = [done, error, cancelled, active, pending].map((prompt) => db.readPrompt(prompt.id));
+        const eventCounts = [done, error, cancelled, active, pending].map((prompt) => allEvents(db, prompt.id).length);
+
+        db.close();
+
+        return {
+            removed,
+            prompts,
+            eventCounts
+        };
+    }, P.equals({
+        removed: 5,
+        prompts: [undefined, undefined, undefined, undefined, undefined],
+        eventCounts: [0, 0, 0, 0, 0]
+    }))
+    .assert("§6.6 reset leaves empty tables and restarts id sequence at 1", () => {
+        const db = openDB("db-reset");
+
+        db.insertPrompt("first");
+        db.insertPrompt("second");
+        db.reset();
+
+        const after = db.insertPrompt("after reset");
+        const prompts = db.listPrompts({
+            limit: 10
+        }).prompts.map((prompt) => prompt.id);
+        const events = allEvents(db, after.id).map((event) => event.sequence);
+
+        db.close();
+
+        return {
+            afterId: after.id,
+            prompts,
+            events
+        };
+    }, P.equals({
+        afterId: 1,
+        prompts: [1],
+        events: [1]
+    }))
+    .assert("§6.1 initDB false on a fresh file throws INVALID_CONFIG and creates no prompts table", () => {
+        const path = tempDatabasePath("db-init-false-fresh");
+        const caught = captureThrown(() => {
+            CTGPromptDB.init({
+                path,
+                initDB: false
+            });
+        });
+        const raw = new DatabaseSync(path);
+        const prompts = raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'prompts'").get();
+
+        raw.close();
+
+        return {
+            invalidConfig: CTGPromptServerError.is(caught) && caught.type === "INVALID_CONFIG",
+            namesResetScript: CTGPromptServerError.is(caught) && caught.msg.includes("reset-everything"),
+            hasPrompts: prompts !== undefined
+        };
+    }, P.equals({
+        invalidConfig: true,
+        namesResetScript: true,
+        hasPrompts: false
+    }))
+    .assert("§6.1 initDB false on an existing schema opens without altering data", () => {
+        const path = tempDatabasePath("db-init-false-existing");
+        const created = CTGPromptDB.init({ path });
+        const prompt = created.insertPrompt("already set up");
+
+        created.close();
+
+        const reopened = CTGPromptDB.init({
+            path,
+            initDB: false
+        });
+        const reread = reopened.readPrompt(prompt.id);
+
+        reopened.close();
+
+        return {
+            id: reread?.id,
+            prompt: reread?.prompt,
+            status: reread?.status
+        };
+    }, P.equals({
+        id: 1,
+        prompt: "already set up",
+        status: "pending"
+    }))
+    .assert("§6.1 DB-created schema matches root schema.sql", () => {
+        const path = tempDatabasePath("db-schema-file");
+        const db = CTGPromptDB.init({ path });
+
+        db.close();
+
+        const expected = schemaStatements();
+        const raw = new DatabaseSync(path);
+        const rows = raw.prepare(`
+            SELECT name, sql FROM sqlite_master
+            WHERE name IN ('prompts', 'events', 'prompts_status_id')
+            ORDER BY name
+        `).all() as SqliteSchemaRow[];
+
+        raw.close();
+
+        return rows.every((row) => normalizeSql(row.sql) === expected.get(row.name))
+            && rows.length === 3
+            && expected.size === 3;
+    }, P.isTrue())
     .assert("§11 cleanup temp databases", () => {
         cleanupTempDatabases();
         return true;
