@@ -322,6 +322,7 @@ interface CTGPromptServerConfig {
     apiKey: string;                // shared key; construction fails if missing or empty
     host?: string;                 // bind address; default "127.0.0.1" (§3.3)
     database?: string;             // SQLite path; default "prompts.db"; ":memory:" permitted
+    initDB?: boolean;              // create the schema in `database` when absent; default true (R32)
     concurrency?: number;          // max simultaneous runs; default 1
     maxPromptBytes?: number;       // UTF-8 byte cap on prompts; default 131071; never above 131071
     streamMode?: StreamMode;       // runner stream contract; default "events"
@@ -401,7 +402,7 @@ active by a dead process, begins dispatching, and binds the port.
 
 | Operation | Signature | Description | Mutates |
 |---|---|---|---|
-| `init` | `ctgPromptServerConfig -> ctgPromptServer` | Validate config, open the database, create the schema if absent, build subscribers and the Express app | Creates the database file, tables, and indexes if absent |
+| `init` | `ctgPromptServerConfig -> ctgPromptServer` | Validate config, open the database, create the schema if absent and `initDB` is true, build subscribers and the Express app | Creates the database file, tables, and indexes if absent and `initDB` is true |
 | `app` | `GETTER :: VOID -> express` | The configured Express application | |
 | `db` | `GETTER :: VOID -> ctgPromptDB` | The database, exposed for tests | |
 | `queue` | `GETTER :: VOID -> ctgPromptQueue` | The dispatcher; throws `INTERNAL_ERROR` before `start` (§4.2) | |
@@ -441,9 +442,14 @@ Performs these steps in order. Any failure throws
    `>= 1`, and `defaultLimit <= maxLimit`.
 8. `streamMode`, when supplied, must be `"raw"` or `"events"`.
 9. `host`, when supplied, must be a non-empty string.
-10. `database`, when supplied, must be a non-empty string.
-11. Open `CTGPromptDB` with `{ path: database }` — creating the schema
-    if absent (§6.1).
+10. `database`, when supplied, must be a non-empty string. `initDB`,
+    when supplied, must be a boolean.
+11. Open `CTGPromptDB` with `{ path: database, initDB }` (§6.1): with
+    `initDB` true (the default) the schema is created in the file when
+    it is absent; with `initDB` false the file is used exactly as it is
+    — nothing is created or altered — and a file with no `prompts`
+    table fails here with `INVALID_CONFIG` naming `reset-everything`,
+    rather than at the first request (R32).
     `init` constructs the instance with `new this(...)`, so a subclass
     calling `init` receives an instance of the subclass — which is how
     a `createRunner` override (§4.2) takes effect.
@@ -949,7 +955,7 @@ same warning class from anything else in the process.
 
 | Operation | Signature | Description | Mutates |
 |---|---|---|---|
-| `init` | `ctgPromptDBConfig -> ctgPromptDB` | Open the database, apply pragmas, create the schema | Creates tables and indexes if absent |
+| `init` | `ctgPromptDBConfig -> ctgPromptDB` | Open the database, apply pragmas, and — when `initDB` is true — apply `schema.sql` if the `prompts` table is absent; when false, verify the table exists (§6.1) | Creates tables and indexes if absent and `initDB` is true |
 | `insertPrompt` | `STRING:prompt -> promptRecord` | Insert a pending prompt and its `pending` event | One prompt row, one event row |
 | `readPrompt` | `NUMBER:id -> promptRecord?` | Read one prompt, or undefined | |
 | `listPrompts` | `promptListQuery -> promptListPage` | Page of prompts by id descending (§6.4) | |
@@ -961,11 +967,19 @@ same warning class from anything else in the process.
 | `readEvents` | `NUMBER:id, NUMBER:afterSequence -> [eventRecord]` | Events with `sequence > afterSequence`, ascending | |
 | `lastSequence` | `NUMBER:id -> NUMBER` | Highest sequence written for the prompt; 0 if none | |
 | `purgeFinished` | `VOID -> NUMBER` | Delete finished prompts and, by cascade, their events (§6.6) | Rows deleted |
+| `purgeAll` | `VOID -> NUMBER` | Delete every prompt regardless of status and, by cascade, every event (§6.6) | All rows deleted |
+| `reset` | `VOID -> VOID` | Drop both tables and the index, then apply `schema.sql` (§6.6) | Tables recreated; the id sequence restarts |
 | `close` | `VOID -> VOID` | Close the database handle | Closes the handle |
 
 ### 6.1 Schema
 
-*realizes: R12, R13, R17*
+*realizes: R12, R13, R17, R32*
+
+**The schema lives in one file, `schema.sql` at the project root**, and
+this section quotes it. `CTGPromptDB` reads that file at open — resolved
+relative to its own module, two directories up, which is the same
+relative position from `src/` and from `dist/` — so there is exactly one
+copy of the SQL. The file ships in the package.
 
 ```sql
 CREATE TABLE IF NOT EXISTS prompts (
@@ -1126,16 +1140,31 @@ the whole history.
 `pending` and `active` rows, and their events, are untouched.
 
 Prompts and events are otherwise **kept forever**. There is no TTL, no
-row cap, and no background sweep. The purge is an operator command:
+row cap, and no background sweep. Deleting is an operator command, never
+an HTTP route: deleting history is not something a client holding the
+API key should be able to do. Three scripts, each a thin wrapper that
+opens the database directly with `CTGPromptDB.init({ path })`, calls one
+method, prints the count, and calls `close()` (R32):
 
-```json
-"scripts": { "purge-finished": "tsx scripts/purge-finished.ts" }
-```
+| Script | Method | Deletes | Touches `pending` / `active` |
+|---|---|---|---|
+| `purge-finished` | `purgeFinished()` | `done`, `error`, `cancelled` rows and their events | no |
+| `purge-all` | `purgeAll()` | every prompt and every event | **yes** — empties the queue |
+| `reset-everything` | `reset()` | drops `events`, `prompts`, and the index, then applies `schema.sql` | **yes** — and the id sequence restarts at 1 |
 
-The script opens the database directly —
-`CTGPromptDB.init({ path }).purgeFinished()` — prints the count, and
-calls `close()`. It is not an HTTP route: deleting history is not
-something a client holding the API key should be able to do.
+`purgeAll :: VOID -> NUMBER` is one transaction: `DELETE FROM prompts`,
+cascade removes the events, return the count. `reset :: VOID -> VOID` is
+one transaction: `DROP TABLE IF EXISTS events`, `DROP TABLE IF EXISTS
+prompts` (the index goes with its table), then the contents of
+`schema.sql`. `reset-everything` is deliberately the long name: an
+operator typing it is meant to notice what it does.
+
+**`purge-all` and `reset-everything` are for a stopped server.** They
+cannot tell whether a server holds the file. Run against a live one, an
+active prompt's next event append finds no row and the run ends as a
+`SERVER` outcome (§5.4 step 6), and recovery on the next `start` has
+nothing to recover. This is operator discipline, documented here and in
+the README, not enforced.
 
 > **Judgment Call 13 — the purge script uses `CTGPromptDB` directly, not
 > a server.** *(Reversed in review by R19; the draft constructed a server
@@ -1633,7 +1662,8 @@ the operator respectively read them.
 | Priorities | Dispatch is FIFO by `id` (D7, R12). |
 | Webhooks / push callbacks | The events table, its SSE projection, and the long poll are the notification mechanisms. |
 | Rate limiting, a cap on how many prompts may be pending | Not decided; see SQ-4. |
-| Automatic retention / TTL | *D8.* Kept forever; `purge-finished` is an operator command (§6.6). |
+| Automatic retention / TTL | *D8.* Kept forever; `purge-finished`, `purge-all`, and `reset-everything` are operator commands (§6.6). |
+| Schema versioning or migration | *R32.* `initDB` creates the schema when the `prompts` table is absent and otherwise leaves the file alone; an existing file with an older shape is not detected or upgraded. The first schema change needs a version marker. |
 | Multi-process or multi-host operation on one database | *R14.* One process owns a database. The concurrency limit is per process (§5.3) and holds only because Node is single-threaded, and recovery's correctness argument (§4.3) depends on the same rule. Supporting more would need lease and owner columns on `prompts` — a schema change. See SQ-1. |
 | Graceful drain on shutdown | *R23, SQ-7.* `close()` does not wait for active runs; they are interrupted exactly as on process exit. `queue.drain()` is a test aid. |
 | A browser client | *R10.* Clients are server-side. Browser `EventSource` cannot set an `Authorization` header, so it cannot reach any route; a browser that needed the stream would use `fetch` with a stream reader, which can. |
@@ -1899,7 +1929,7 @@ Settled with the owner on 2026-09-02, before the first draft.
 | D9 | No operational logging in v1; fatal errors surface as ordinary process behavior. |
 | D10 | A shared API key in a request header on every route; the server refuses to start without one. |
 
-The review resolutions R1–R31 refine these; where the two differ the
+The review resolutions R1–R32 refine these (R32, 2026-09-02: `schema.sql` as the single schema source, `initDB`, `purge-all`, `reset-everything`); where the two differ the
 resolution governs and both are cited.
 
 ---
