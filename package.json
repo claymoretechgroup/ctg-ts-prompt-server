@@ -48,7 +48,7 @@
     "typescript": "^5.9.0"
   },
   "dependencies": {
-    "ctg-ai-agent-proc": "github:claymoretechgroup/ctg-ai-agent-proc#2de1b44",
+    "ctg-ai-agent-proc": "github:claymoretechgroup/ctg-ai-agent-proc#v0.2.1",
     "express": "^5.1.0"
   }
 }
