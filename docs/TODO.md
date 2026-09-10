@@ -29,6 +29,17 @@ Current branch context:
 4. Confirm whether `CTGPromptQueue` needs any private methods documented beyond the public/static surface.
 5. Confirm whether `runner` should remain nullable metadata in the initial schema or be written on every claim.
 
+## Operational Docs
+
+1. Decide whether to create `docs/spec2.operations.md` or fold operational assumptions into the assembled `docs/spec2.md`.
+2. Document that one server process owns one DB file; WAL allows concurrent readers but not multiple active service workers on the same database.
+3. Document deployment assumptions: host process, Docker bridge access, Bearer auth as the protection boundary, and `runner.env` as a full child-environment replacement.
+4. Document maintenance scripts for purge finished, purge all, and reset schema, including whether they run SQL directly or call a helper.
+5. Document startup and shutdown order: recovery before new claims, queue start/stop behavior, active runner handling, SSE close behavior, and DB close behavior.
+6. Document operational limits: fixed JSON body limit, `maxPromptBytes`, runner timeout/default `maxBuffer`, SSE keep-alive cadence, and long-poll wait clamping.
+7. Confirm the observability stance: keep the original "no operational logging" decision or define explicit logging behavior.
+8. Document the source-of-truth process for split docs versus assembled `docs/spec2.md`.
+
 ## Implementation Order
 
 1. Update exported types in `src/types.ts`.
