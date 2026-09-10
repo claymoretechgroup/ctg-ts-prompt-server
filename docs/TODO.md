@@ -40,6 +40,15 @@ Current branch context:
 7. Confirm the observability stance: keep the original "no operational logging" decision or define explicit logging behavior.
 8. Document the source-of-truth process for split docs versus assembled `docs/spec2.md`.
 
+## Original Spec Parity
+
+1. Compare the split v2 docs against `docs/spec.md` before implementation starts.
+2. Carry forward server configuration details that still apply: host, port, auth token, Docker bridge defaults, runner config, and queue limits.
+3. Carry forward HTTP API behavior that still applies: prompt creation, prompt lookup, prompt cancellation, pagination, streaming, long polling, health, and method/content-type errors.
+4. Carry forward response envelope behavior and decide which envelopes belong to `CTGPromptServer` versus `CTGPromptServerError`.
+5. Carry forward shutdown behavior around signals, server close, queue stop, active runners, and database close.
+6. Explicitly mark any original v1 feature that is intentionally omitted from v2 initial scope.
+
 ## Implementation Order
 
 1. Update exported types in `src/types.ts`.
@@ -57,3 +66,5 @@ Current branch context:
 - `runPrompt` starts `runner.run(record.prompt, ...)`; `activeRunner(...)` only constructs the `ActiveRunner` value.
 - `interruptActive()` is server-startup recovery and marks previously active records as interrupted terminal outcomes before new work is claimed.
 - Initial spec2 intentionally does not persist stream-event history; reconnect reads the current prompt queue record.
+- Public/exported support types use the `CTG` prefix; local helper types can remain unprefixed.
+- Database fields store numeric codes for prompt status and terminal errors; labels are resolved in TypeScript.
