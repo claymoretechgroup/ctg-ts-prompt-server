@@ -11,11 +11,15 @@ Current branch context:
 
 1. Continue `docs/spec2.classes.md` with `CTGPromptServer`.
 2. Continue `docs/spec2.classes.md` with `CTGPromptServerError`.
-3. Decide whether the combined `docs/spec2.md` should be regenerated from:
+3. Create `docs/spec2.conformance.md` as the single conformance criteria document.
+4. Organize conformance by class where useful, plus cross-class workflows where behavior spans boundaries.
+5. Keep conformance criteria out of `docs/spec2.classes.md`; class docs should define shape and behavior, not test requirements.
+6. Decide whether the combined `docs/spec2.md` should be regenerated from:
    - `docs/spec2.db.md`
    - `docs/spec2.types.md`
    - `docs/spec2.classes.md`
-4. If `docs/spec2.md` remains checked in, add a short note that it is the assembled implementation spec.
+   - `docs/spec2.conformance.md`
+7. If `docs/spec2.md` remains checked in, add a short note that it is the assembled implementation spec.
 
 ## Open Design Checks
 
@@ -33,7 +37,8 @@ Current branch context:
 4. Refactor `CTGPromptQueue` around `CTGAgentProc` and `ActiveRunner`.
 5. Move live SSE sinks and long-poll waiters into `CTGPromptServer`.
 6. Remove `CTGPromptSubscribers` after the server owns live delivery.
-7. Update conformance tests around DB transitions, queue lifecycle, SSE, long polling, and error envelopes.
+7. Write `docs/spec2.conformance.md`.
+8. Update conformance tests around DB transitions, queue lifecycle, SSE, long polling, and error envelopes.
 
 ## Notes
 
@@ -41,4 +46,3 @@ Current branch context:
 - `runPrompt` starts `runner.run(record.prompt, ...)`; `activeRunner(...)` only constructs the `ActiveRunner` value.
 - `interruptActive()` is server-startup recovery and marks previously active records as interrupted terminal outcomes before new work is claimed.
 - Initial spec2 intentionally does not persist stream-event history; reconnect reads the current prompt queue record.
-
