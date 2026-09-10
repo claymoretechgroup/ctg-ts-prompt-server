@@ -613,17 +613,15 @@ interface ActiveRunner {
 interface ActiveRunnerConfig {
     readonly record: CTGPromptQueueRecord;
     readonly runner: LLMRunner;
-    readonly streamMode: CTGPromptStreamMode;
-    readonly onStream: LLMRunnerStreamHandler;
+    readonly result: Promise<LLMRunnerResult>;
 }
 ```
 
 | Property | Type | Required | Meaning |
 |---|---|---:|---|
-| `record` | `CTGPromptQueueRecord` | yes | Claimed prompt queue record to execute. |
-| `runner` | `LLMRunner` | yes | Runner instance that will execute the record. |
-| `streamMode` | `CTGPromptStreamMode` | yes | Stream format used to extract response text. |
-| `onStream` | `LLMRunnerStreamHandler` | yes | Stream callback passed into `runner.run(...)`. |
+| `record` | `CTGPromptQueueRecord` | yes | Claimed prompt queue record being executed. |
+| `runner` | `LLMRunner` | yes | Runner instance executing the record. |
+| `result` | `Promise<LLMRunnerResult>` | yes | Promise returned by the runner after `runPrompt` starts execution. |
 
 `ActiveRunner.error === null` means no server-side error has been
 captured for that active runner. Project-owned code throws `Error`
@@ -664,7 +662,7 @@ class CTGPromptQueue {
     static statusOf(code: number): CTGPromptQueueStatusLabel;
     static isStatusCode(code: number): boolean;
 
-    private static activeRunner(config: ActiveRunnerConfig): ActiveRunner;
+    static activeRunner(config: ActiveRunnerConfig): ActiveRunner;
 }
 ```
 
@@ -833,14 +831,11 @@ interrupted records. It is called during server startup before
 
 ### 4.12 activeRunner
 
-`CTGPromptQueue` owns a queue-internal static
+`CTGPromptQueue` owns a public static
 `activeRunner(config: ActiveRunnerConfig): ActiveRunner` helper. It
-creates an `ActiveRunner` record and starts
-`runner.run(record.prompt, ...)`.
-
-It must normalize a synchronous throw from `runner.run(...)` into a
-rejected `result`, so queue agents can handle synchronous throws and
-asynchronous rejections with one failure path.
+creates an `ActiveRunner` value from an already-started runner result
+promise. It does not call `runner.run(...)`; `runPrompt` starts the
+runner and normalizes synchronous throws into rejected result promises.
 
 ### 4.13 Agent Workflow
 
@@ -864,10 +859,16 @@ registers one runner and these agents:
 
 `runPrompt`:
 
-1. Creates an `ActiveRunner` through `CTGPromptQueue.activeRunner(...)`.
-2. Stores it in `activeRunners` keyed by record ID.
-3. Attaches result continuations.
-4. Calls `done()` without awaiting `activeRunner.result`.
+1. Creates the active runner stream handler.
+2. Starts `runner.run(record.prompt, ...)` and captures the result
+   promise.
+3. Normalizes a synchronous throw from `runner.run(...)` into a rejected
+   result promise.
+4. Creates an `ActiveRunner` through
+   `CTGPromptQueue.activeRunner(...)`.
+5. Stores it in `activeRunners` keyed by record ID.
+6. Attaches result continuations.
+7. Calls `done()` without awaiting `activeRunner.result`.
 
 Runner result continuations are posted to the queue-owned
 `CTGAgentProc` instance. They must not use a worker-scoped `send()` after

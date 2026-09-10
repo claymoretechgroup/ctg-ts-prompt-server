@@ -295,17 +295,15 @@ being stored on `ActiveRunner.error`.
 interface ActiveRunnerConfig {
     readonly record: CTGPromptQueueRecord;
     readonly runner: LLMRunner;
-    readonly streamMode: CTGPromptStreamMode;
-    readonly onStream: LLMRunnerStreamHandler;
+    readonly result: Promise<LLMRunnerResult>;
 }
 ```
 
 | Property | Type | Required | Meaning |
 |---|---|---:|---|
-| `record` | `CTGPromptQueueRecord` | yes | Claimed prompt queue record to execute. |
-| `runner` | `LLMRunner` | yes | Runner instance that will execute the record. |
-| `streamMode` | `CTGPromptStreamMode` | yes | Stream format used to extract response text. |
-| `onStream` | `LLMRunnerStreamHandler` | yes | Stream callback passed into `runner.run(...)`. |
+| `record` | `CTGPromptQueueRecord` | yes | Claimed prompt queue record being executed. |
+| `runner` | `LLMRunner` | yes | Runner instance executing the record. |
+| `result` | `Promise<LLMRunnerResult>` | yes | Promise returned by the runner after `runPrompt` starts execution. |
 
 ---
 
@@ -536,4 +534,3 @@ Outcome error label/code map:
 The database stores `error_code`, not error labels. Label resolution is
 performed by `CTGPromptServerError.labelOf(code)`. Unknown numeric codes
 must be treated as corrupted or unsupported stored state.
-
