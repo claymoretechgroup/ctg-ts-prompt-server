@@ -58,7 +58,7 @@ Column meanings:
 | `error_code` | Outcome error code when `status_code = 4`; otherwise `NULL`. Valid outcome codes are `1013`, `1014`, and `1015`. |
 | `error_message` | Outcome error message when `status_code = 4`; otherwise `NULL`. |
 | `info` | JSON diagnostics for operators. It is not serialized on HTTP prompt responses. |
-| `runner` | Runner type assigned when the record is claimed. `NULL` while pending. |
+| `runner` | Runner type metadata. It may remain `NULL` for the initial single-runner service. |
 | `created_at` | Epoch milliseconds when the record was submitted. |
 | `started_at` | Epoch milliseconds when the record was claimed. `NULL` until active. |
 | `finished_at` | Epoch milliseconds when the record entered a terminal state. `NULL` until finished. |
@@ -76,6 +76,32 @@ SQLite pragmas applied on open:
 The initial spec2 schema does not store per-event stream history. SSE is
 live-only. If a client disconnects, it recovers the current queue record
 through `GET /prompt/:id`.
+
+### 1.1 Maintenance SQL
+
+Maintenance operations are script-level SQL tasks, not `CTGPromptDB`
+runtime methods.
+
+Purge finished records:
+
+```sql
+DELETE FROM prompts
+WHERE status_code IN (3, 4, 5);
+```
+
+Purge all records:
+
+```sql
+DELETE FROM prompts;
+```
+
+Reset schema:
+
+```sql
+DROP TABLE IF EXISTS prompts;
+```
+
+After reset, recreate the schema from this specification.
 
 ---
 
@@ -109,8 +135,8 @@ type CTGPromptDBFinishStatusCode = 3 | 4;
 
 | Value | Meaning |
 |---:|---|
-| `3` | `DONE`; successful terminal outcome accepted by `CTGPromptDB.finishPrompt(...)`. |
-| `4` | `ERROR`; failed terminal outcome accepted by `CTGPromptDB.finishPrompt(...)`. |
+| `3` | `DONE`; successful terminal outcome accepted by `CTGPromptDB.finish(...)`. |
+| `4` | `ERROR`; failed terminal outcome accepted by `CTGPromptDB.finish(...)`. |
 
 **CTGPromptDBConfig**
 
@@ -173,7 +199,7 @@ interface CTGPromptQueueRecord {
 | `errorCode` | `CTGPromptOutcomeErrorCode \| null` | yes | Stored outcome error code, or `null` when there is no error. |
 | `errorMessage` | `string \| null` | yes | Stored outcome error message, or `null` when there is no error. |
 | `info` | `Readonly<Record<string, unknown>> \| null` | yes | Operator diagnostics parsed from the stored JSON value. |
-| `runner` | `CTGPromptRunnerType \| null` | yes | Runner type assigned when the record is claimed. |
+| `runner` | `CTGPromptRunnerType \| null` | yes | Optional runner type metadata for the record. |
 | `createdAt` | `number` | yes | Epoch milliseconds when the record was submitted. |
 | `startedAt` | `number \| null` | yes | Epoch milliseconds when the record was claimed. |
 | `finishedAt` | `number \| null` | yes | Epoch milliseconds when the record reached terminal state. |
@@ -209,52 +235,100 @@ interface CTGPromptPaginationPage {
 | `nextBefore` | `number \| null` | yes | Cursor for the next page, or `null` when no next page exists. |
 
 `CTGPromptDBFinishStatusCode` is the subset of status codes accepted by
-`CTGPromptDB.finishPrompt(...)`: `3` for `DONE` and `4` for `ERROR`.
+`CTGPromptDB.finish(...)`: `3` for `DONE` and `4` for `ERROR`.
 `CANCELLED` is terminal queue state, but it is written by
-`cancelPending(...)`, not `finishPrompt(...)`.
+`cancel(...)`, not `finish(...)`.
 
-Public surface:
+Constructor:
+
+```ts
+class CTGPromptDB {
+    constructor(config: CTGPromptDBConfig);
+}
+```
+
+The constructor opens the configured SQLite database and initializes the
+schema when `config.initDB !== false`.
+
+Static fields:
+
+```ts
+class CTGPromptDB {
+    // No static fields.
+}
+```
+
+Static methods:
 
 ```ts
 class CTGPromptDB {
     static init(config: CTGPromptDBConfig): CTGPromptDB;
+}
+```
 
-    insertPrompt(prompt: string): CTGPromptQueueRecord;
-    readPrompt(id: number): CTGPromptQueueRecord | null;
-    listPrompts(pagination: CTGPromptPagination): CTGPromptPaginationPage;
+`CTGPromptDB.init(config)` returns `new CTGPromptDB(config)`.
 
-    claimNextPending(runnerType: CTGPromptRunnerType): CTGPromptQueueRecord | null;
-    appendResponse(id: number, text: string): CTGPromptQueueRecord;
-    finishPrompt(id: number, outcome: CTGPromptDBPromptOutcome): CTGPromptQueueRecord;
-    cancelPending(id: number): CTGPromptQueueRecord;
+Instance fields:
+
+```ts
+class CTGPromptDB {
+    private readonly _db: DatabaseSync;
+}
+```
+
+| Field | Type | Visibility | Meaning |
+|---|---|---|---|
+| `_db` | `DatabaseSync` | private readonly | Underlying SQLite connection. |
+
+Instance methods:
+
+```ts
+class CTGPromptDB {
+    create(prompt: string): CTGPromptQueueRecord;
+    read(id: number): CTGPromptQueueRecord | null;
+    paginate(pagination: CTGPromptPagination): CTGPromptPaginationPage;
+    update(record: CTGPromptQueueRecord): CTGPromptQueueRecord;
+    delete(id: number): CTGPromptQueueRecord | null;
+    append(id: number, text: string): CTGPromptQueueRecord;
+
+    claimNext(): CTGPromptQueueRecord | null;
+    finish(id: number, outcome: CTGPromptDBPromptOutcome): CTGPromptQueueRecord;
+    cancel(id: number): CTGPromptQueueRecord;
     interruptActive(): number;
 
-    purgeFinished(): number;
-    purgeAll(): number;
-    reset(): void;
     close(): void;
 }
 ```
 
-### 3.1 Insert
+### 3.1 constructor
 
-`insertPrompt(prompt)` inserts one row:
+`constructor(config)` opens SQLite, applies pragmas, and initializes the
+schema when `config.initDB !== false`.
+
+### 3.2 init
+
+`init(config)` is a static factory method. It constructs and returns a
+`CTGPromptDB` instance.
+
+### 3.3 create
+
+`create(prompt)` inserts one row:
 
 - `status_code = 1`
 - `prompt = prompt`
 - `response = ''`
 - `created_at = Date.now()`
 
-It returns the inserted `CTGPromptQueueRecord`.
+It returns the created `CTGPromptQueueRecord`.
 
-### 3.2 Read
+### 3.4 read
 
-`readPrompt(id)` returns the record for ID `id`, or `null` when no row
-exists. It is a database read operation used by `CTGPromptServer`.
+`read(id)` returns the record for ID `id`, or `null` when no row exists.
+It is a database read operation used by `CTGPromptServer`.
 
-### 3.3 List
+### 3.5 paginate
 
-`listPrompts(pagination)` returns records ordered by newest ID first.
+`paginate(pagination)` returns records ordered by newest ID first.
 
 `pagination.statusCode`, when supplied, filters records to one queue
 status code.
@@ -271,35 +345,77 @@ LIMIT ?
 `nextBefore` is the ID of the last returned record when another page is
 available; otherwise it is `null`.
 
-### 3.4 Claim
+### 3.6 update
 
-`claimNextPending(runnerType)` atomically claims the oldest pending
-record.
+`update(record)` persists an existing `CTGPromptQueueRecord` and returns
+the updated materialized record.
+
+`update(...)` is the generic row write primitive. Higher-level DB
+methods wrap it when they express named queue behavior, so callers do
+not need to reconstruct common record changes.
+
+Rules:
+
+1. If `record.id` does not exist, throw `PROMPT_NOT_FOUND`.
+2. The record ID identifies the row being updated.
+3. The full `CTGPromptQueueRecord` gives `update(...)` access to every
+   column value for that row.
+4. Implementations may choose which record properties are actually
+   written without violating the interface.
+5. `id`, `prompt`, and `created_at` are immutable after `create(...)`;
+   they are used for identity and integrity, not overwritten.
+6. Mutable fields are `statusCode`, `response`, `errorCode`,
+   `errorMessage`, `info`, `runner`, `startedAt`, and `finishedAt`.
+7. If the provided record does not change any mutable field, return the
+   existing record unchanged.
+8. `statusCode` may be set by `update(...)`, but normal queue lifecycle
+   transitions should use `claimNext()`, `finish(...)`, `cancel(...)`,
+   or `interruptActive()`.
+9. The resulting row must satisfy all database constraints.
+
+### 3.7 delete
+
+`delete(id)` deletes one row and returns the deleted
+`CTGPromptQueueRecord`. It returns `null` when ID `id` does not exist.
+
+### 3.8 append
+
+`append(id, text)` appends text to the record's `response` column and
+returns the updated `CTGPromptQueueRecord`.
+
+It does not change `statusCode`.
+
+It wraps:
+
+```ts
+const record = read(id);
+if (record === null) throw CTGPromptServerError("PROMPT_NOT_FOUND");
+update({ ...record, response: record.response + text });
+```
+
+If ID `id` does not exist, it throws `PROMPT_NOT_FOUND`. Implementations
+should use SQLite string concatenation to preserve atomic append
+behavior.
+
+### 3.9 claimNext
+
+`claimNext()` atomically claims the oldest pending record.
 
 Steps, in one transaction:
 
 1. Select the oldest row where `status_code = 1`.
 2. If none exists, return `null`.
-3. Update that row to `status_code = 2`, set `started_at`, and set
-   `runner = runnerType`.
+3. Update that row to `status_code = 2` and set `started_at`.
 4. Return the updated `CTGPromptQueueRecord`.
 
 The update condition must include `WHERE status_code = 1` so claim
 and cancellation cannot both win for the same row.
 
-### 3.5 Append Response
+### 3.10 finish
 
-`appendResponse(id, text)` appends text to the record's `response`
-column. If ID `id` does not exist, it throws
-`CTGPromptServerError("PROMPT_NOT_FOUND")`.
-
-Response appends are used by active runner stream handlers. The final
-successful runner result later overwrites `response`.
-
-### 3.6 Finish
-
-`finishPrompt(id, outcome)` moves a record to terminal status code `3`
-or `4`.
+`finish(id, outcome)` moves a record to terminal status code `3` or
+`4`. It wraps `update(...)` with the corresponding status, response or
+error fields, optional diagnostics, and `finishedAt = Date.now()`.
 
 For `statusCode = 3`:
 
@@ -318,17 +434,17 @@ For `statusCode = 4`:
 - `info = JSON.stringify(outcome.info)` when supplied
 - `finished_at = Date.now()`
 
-### 3.7 Cancel
+### 3.11 cancel
 
-`cancelPending(id)` cancels only pending records.
+`cancel(id)` cancels only pending records.
 
 - Unknown ID throws `PROMPT_NOT_FOUND`.
 - Active records throw `CANCEL_NOT_ALLOWED`.
 - Finished records throw `CANCEL_NOT_ALLOWED`.
-- A successful cancellation sets `status_code = 5` and
-  `finished_at`.
+- A successful cancellation wraps `update(...)` with `statusCode = 5`
+  and `finishedAt = Date.now()`.
 
-### 3.8 Recovery
+### 3.12 interruptActive
 
 `interruptActive()` moves every row with `status_code = 2` to
 `status_code = 4` with:
@@ -339,14 +455,6 @@ For `statusCode = 4`:
 - `finished_at = Date.now()`
 
 It returns the number of rows changed.
-
-### 3.9 Purge And Reset
-
-`purgeFinished()` deletes rows with `status_code` 3, 4, or 5.
-
-`purgeAll()` deletes every prompt row.
-
-`reset()` drops and recreates the schema.
 
 ---
 
@@ -474,7 +582,7 @@ interface CTGPromptQueueConfig {
 |---|---|---:|---|
 | `db` | `CTGPromptDB` | yes | Durable prompt database used by the queue. |
 | `runner` | `LLMRunner` | yes | Configured runner instance used to execute prompts. |
-| `runnerType` | `CTGPromptRunnerType` | yes | Runner type stored on claimed records. |
+| `runnerType` | `CTGPromptRunnerType` | yes | Configured runner type for the queue. |
 | `concurrency` | `number` | yes | Maximum number of active runners. |
 | `maxPromptBytes` | `number` | yes | Maximum accepted prompt size in UTF-8 bytes. |
 | `streamMode` | `CTGPromptStreamMode` | yes | Stream format used to extract response text. |
@@ -522,7 +630,32 @@ captured for that active runner. Project-owned code throws `Error`
 instances. Any caught non-`Error` value is converted to `Error` before
 being stored on `ActiveRunner.error`.
 
-Public surface:
+Constructor:
+
+```ts
+class CTGPromptQueue {
+    constructor(config: CTGPromptQueueConfig);
+}
+```
+
+The constructor configures the durable DB boundary, runner, internal
+`CTGAgentProc`, callbacks, and active runner registry.
+
+Static fields:
+
+```ts
+class CTGPromptQueue {
+    private static readonly STATUS_CODE_BY_LABEL: Readonly<Record<CTGPromptQueueStatusLabel, CTGPromptQueueStatusCode>>;
+    private static readonly STATUS_LABEL_BY_CODE: Readonly<Record<CTGPromptQueueStatusCode, CTGPromptQueueStatusLabel>>;
+}
+```
+
+| Field | Type | Visibility | Meaning |
+|---|---|---|---|
+| `STATUS_CODE_BY_LABEL` | `Readonly<Record<CTGPromptQueueStatusLabel, CTGPromptQueueStatusCode>>` | private static readonly | Internal map used by `statusCodeOf(...)`. |
+| `STATUS_LABEL_BY_CODE` | `Readonly<Record<CTGPromptQueueStatusCode, CTGPromptQueueStatusLabel>>` | private static readonly | Internal map used by `statusOf(...)`. |
+
+Static methods:
 
 ```ts
 class CTGPromptQueue {
@@ -531,10 +664,53 @@ class CTGPromptQueue {
     static statusOf(code: number): CTGPromptQueueStatusLabel;
     static isStatusCode(code: number): boolean;
 
+    private static activeRunner(config: ActiveRunnerConfig): ActiveRunner;
+}
+```
+
+`CTGPromptQueue.init(config)` returns `new CTGPromptQueue(config)`.
+
+Instance fields:
+
+```ts
+class CTGPromptQueue {
+    private readonly _db: CTGPromptDB;
+    private readonly _runner: LLMRunner;
+    private readonly _runnerType: CTGPromptRunnerType;
+    private readonly _concurrency: number;
+    private readonly _maxPromptBytes: number;
+    private readonly _streamMode: CTGPromptStreamMode;
+    private readonly _onStreamMessage: (message: CTGPromptQueueStreamMessage) => void;
+    private readonly _onPromptFinished: (id: number) => void;
+    private readonly _proc: CTGAgentProc;
+    private readonly _activeRunners: ActiveRunners;
+    private _started: boolean;
+    private _stopping: Promise<void> | null;
+}
+```
+
+| Field | Type | Visibility | Meaning |
+|---|---|---|---|
+| `_db` | `CTGPromptDB` | private readonly | Durable prompt database boundary. |
+| `_runner` | `LLMRunner` | private readonly | Configured runner instance. |
+| `_runnerType` | `CTGPromptRunnerType` | private readonly | Configured runner type. |
+| `_concurrency` | `number` | private readonly | Maximum active runner count. |
+| `_maxPromptBytes` | `number` | private readonly | Maximum accepted prompt size. |
+| `_streamMode` | `CTGPromptStreamMode` | private readonly | Stream extraction mode. |
+| `_onStreamMessage` | `(message: CTGPromptQueueStreamMessage) => void` | private readonly | Callback used to hand live stream messages to the server. |
+| `_onPromptFinished` | `(id: number) => void` | private readonly | Callback used to wake server-owned waiters and close terminal streams. |
+| `_proc` | `CTGAgentProc` | private readonly | Internal agent workflow process. |
+| `_activeRunners` | `ActiveRunners` | private readonly | Active runner registry keyed by queue record ID. |
+| `_started` | `boolean` | private | Whether the queue may claim new pending records. |
+| `_stopping` | `Promise<void> \| null` | private | Current stop operation, or `null` when no stop is in progress. |
+
+Instance methods:
+
+```ts
+class CTGPromptQueue {
     submit(prompt: string): CTGPromptQueueRecord;
     cancel(id: number): CTGPromptQueueRecord;
     next(): CTGPromptQueueRecord | null;
-
     recover(): number;
     start(): void;
     stop(): Promise<void>;
@@ -567,7 +743,33 @@ numeric input before it is accepted as stored state.
 labels. Unknown numeric status codes must be treated as corrupted or
 unsupported stored state.
 
-### 4.1 Submit
+### 4.1 constructor
+
+`constructor(config)` initializes the queue's DB reference, runner,
+runner type, concurrency limit, stream mode, callbacks, internal
+`CTGAgentProc`, and active runner registry.
+
+### 4.2 init
+
+`init(config)` is a static factory method. It constructs and returns a
+`CTGPromptQueue` instance.
+
+### 4.3 statusCodeOf
+
+`statusCodeOf(status)` resolves a `CTGPromptQueueStatusLabel` to a
+`CTGPromptQueueStatusCode`.
+
+### 4.4 statusOf
+
+`statusOf(code)` resolves a `CTGPromptQueueStatusCode` to a
+`CTGPromptQueueStatusLabel`.
+
+### 4.5 isStatusCode
+
+`isStatusCode(code)` returns whether `code` is a supported
+`CTGPromptQueueStatusCode`.
+
+### 4.6 submit
 
 `submit(prompt)` validates and stores one pending queue record.
 
@@ -580,7 +782,7 @@ Validation:
 
 On success:
 
-1. Insert the prompt with `db.insertPrompt(prompt)`.
+1. Create the record with `db.create(prompt)`.
 2. Emit a live `pending` stream event message through
    `onStreamMessage`.
 3. If the queue is started, ensure `checkWork` is queued.
@@ -588,9 +790,9 @@ On success:
 
 The prompt text is stored and executed byte-for-byte as submitted.
 
-### 4.2 Cancel
+### 4.7 cancel
 
-`cancel(id)` cancels a pending record with `db.cancelPending(id)`.
+`cancel(id)` cancels a pending record with `db.cancel(id)`.
 
 On success:
 
@@ -598,32 +800,38 @@ On success:
 2. Call `onPromptFinished(id)`.
 3. Return the cancelled record.
 
-### 4.3 Next
+### 4.8 next
 
 `next()` is the queue's durable scheduling primitive. It calls
-`db.claimNextPending(runnerType)` and returns the active
-`CTGPromptQueueRecord`, or `null` when no pending record is available.
+`db.claimNext()` and returns the active `CTGPromptQueueRecord`, or
+`null` when no pending record is available.
+
+When a record is claimed, `CTGPromptQueue` may persist configured runner
+metadata by calling `db.update({ ...record, runner: runnerType })`.
+For the initial single-runner service, `runner` may remain `null`.
 
 It is not a general read API.
 
-### 4.4 Start And Stop
+### 4.9 start
 
 `start()` enables queue processing and queues `checkWork`.
 
 `start()` is idempotent. Calling it while already started must not cause
 duplicate work claims beyond the configured concurrency limit.
 
+### 4.10 stop
+
 `stop()` disables new claims and waits for active runner results plus
 queued terminal tasks to settle. A stopped queue may accept submitted
 records, but it must not claim them until `start()` is called again.
 
-### 4.5 Recovery
+### 4.11 recover
 
 `recover()` calls `db.interruptActive()` and returns the number of
 interrupted records. It is called during server startup before
 `start()`.
 
-### 4.6 Active Runner Factory
+### 4.12 activeRunner
 
 `CTGPromptQueue` owns a queue-internal static
 `activeRunner(config: ActiveRunnerConfig): ActiveRunner` helper. It
@@ -634,7 +842,7 @@ It must normalize a synchronous throw from `runner.run(...)` into a
 rejected `result`, so queue agents can handle synchronous throws and
 asynchronous rejections with one failure path.
 
-### 4.7 Agent Workflow
+### 4.13 Agent Workflow
 
 `CTGPromptQueue` uses `CTGAgentProc` as the internal workflow engine. It
 registers one runner and these agents:
@@ -669,7 +877,7 @@ that worker has called `done()`.
 
 1. If `activeRunner.error !== null`, route to `failPrompt` with
    `errorCode = 1014`.
-2. Otherwise call `db.finishPrompt(id, { statusCode: 3, response:
+2. Otherwise call `db.finish(id, { statusCode: 3, response:
    result.result, info: { stderr: result.error } })`.
 3. Emit a live `done` stream event message.
 4. Delete the active runner from `activeRunners`.
@@ -681,7 +889,7 @@ that worker has called `done()`.
 
 1. Convert runner failures into `errorCode = 1013`.
 2. Convert server failures into `errorCode = 1014`.
-3. Call `db.finishPrompt(id, { statusCode: 4, errorCode, errorMessage,
+3. Call `db.finish(id, { statusCode: 4, errorCode, errorMessage,
    info })`.
 4. Emit a live `error` stream event message.
 5. Delete the active runner from `activeRunners`.
@@ -689,7 +897,7 @@ that worker has called `done()`.
 7. If the queue is started, queue `checkWork`.
 8. Call `done()`.
 
-### 4.8 Stream Handling
+### 4.14 Stream Handling
 
 The active runner stream handler maps upstream runner events into live
 queue stream event messages.
@@ -712,7 +920,7 @@ Response contribution:
 | `events` + `codex` | assistant text from Codex assistant message payloads |
 
 If a stream event contributes response text, the handler calls
-`db.appendResponse(id, text)` before emitting the live stream event
+`db.append(id, text)` before emitting the live stream event
 message.
 If the append throws, the caught value is normalized to `Error` and
 stored as `activeRunner.error`.
@@ -803,15 +1011,80 @@ to construct the runner, and adding any stream extraction rules required
 for `streamMode = "events"`. No database schema change is required
 unless runner type values are constrained in SQLite.
 
-Public surface:
+Constructor:
+
+```ts
+class CTGPromptServer {
+    constructor(config: CTGPromptServerConfig);
+}
+```
+
+The constructor validates configuration, creates the Express app, and
+initializes server-owned live stream and waiter registries. The DB and
+queue are opened by `start(...)`.
+
+Static fields:
+
+```ts
+class CTGPromptServer {
+    static readonly BODY_LIMIT_BYTES = 1048576;
+}
+```
+
+| Field | Type | Visibility | Meaning |
+|---|---|---|---|
+| `BODY_LIMIT_BYTES` | `1048576` | public static readonly | Maximum accepted JSON request body size in bytes. |
+
+Static methods:
 
 ```ts
 class CTGPromptServer {
     static init(config: CTGPromptServerConfig): CTGPromptServer;
+}
+```
 
-    readonly app: Express;
-    readonly db: CTGPromptDB;
-    readonly queue: CTGPromptQueue;
+`CTGPromptServer.init(config)` returns `new CTGPromptServer(config)`.
+
+Instance fields and accessors:
+
+```ts
+class CTGPromptServer {
+    private readonly _config: CTGPromptServerConfig;
+    private readonly _app: Express;
+    private _db: CTGPromptDB | null;
+    private _queue: CTGPromptQueue | null;
+    private _listener: Server | null;
+    private readonly _liveSinks: Map<number, Set<Response>>;
+    private readonly _waiters: Map<number, Set<() => void>>;
+    private _started: boolean;
+
+    get app(): Express;
+    get db(): CTGPromptDB;
+    get queue(): CTGPromptQueue;
+}
+```
+
+| Field | Type | Visibility | Meaning |
+|---|---|---|---|
+| `_config` | `CTGPromptServerConfig` | private readonly | Validated server configuration. |
+| `_app` | `Express` | private readonly | Express application instance. |
+| `_db` | `CTGPromptDB \| null` | private | Durable prompt database after `start(...)`, otherwise `null`. |
+| `_queue` | `CTGPromptQueue \| null` | private | Prompt queue workflow after `start(...)`, otherwise `null`. |
+| `_listener` | `Server \| null` | private | HTTP listener after `start(...)`, otherwise `null`. |
+| `_liveSinks` | `Map<number, Set<Response>>` | private readonly | Server-owned live SSE response sinks keyed by queue record ID. |
+| `_waiters` | `Map<number, Set<() => void>>` | private readonly | Server-owned long-poll completion waiters keyed by queue record ID. |
+| `_started` | `boolean` | private | Whether the HTTP server has been started. |
+| `app` | `Express` | public getter | Express application instance. |
+| `db` | `CTGPromptDB` | public getter | Started durable prompt database; unavailable before `start(...)`. |
+| `queue` | `CTGPromptQueue` | public getter | Started prompt queue workflow; unavailable before `start(...)`. |
+
+Instance methods and accessors:
+
+```ts
+class CTGPromptServer {
+    get app(): Express;
+    get db(): CTGPromptDB;
+    get queue(): CTGPromptQueue;
 
     start(port: number): Promise<{ host: string; port: number }>;
     close(): Promise<void>;
@@ -820,7 +1093,18 @@ class CTGPromptServer {
 }
 ```
 
-### 5.1 Config
+### 5.1 constructor
+
+`constructor(config)` validates server configuration, stores the
+configuration required by `start(...)`, builds the Express app, and
+initializes empty `_liveSinks` and `_waiters` maps.
+
+### 5.2 init
+
+`init(config)` is a static factory method. It constructs and returns a
+`CTGPromptServer` instance.
+
+### 5.3 Config
 
 Defaults:
 
@@ -840,7 +1124,21 @@ Defaults:
 `runner.env` is a complete replacement for the child environment. When
 omitted, the child inherits the server process environment.
 
-### 5.2 Start And Close
+### 5.4 app
+
+`app` returns the configured Express app.
+
+### 5.5 db
+
+`db` returns the started `CTGPromptDB` instance. If called before
+`start(...)`, it throws `INTERNAL_ERROR`.
+
+### 5.6 queue
+
+`queue` returns the started `CTGPromptQueue` instance. If called before
+`start(...)`, it throws `INTERNAL_ERROR`.
+
+### 5.7 start
 
 `start(port)`:
 
@@ -853,6 +1151,8 @@ omitted, the child inherits the server process environment.
 6. Calls `queue.start()`.
 7. Binds the Express app.
 
+### 5.8 close
+
 `close()`:
 
 1. Stops accepting HTTP connections.
@@ -860,7 +1160,13 @@ omitted, the child inherits the server process environment.
 3. Calls `queue.stop()`.
 4. Closes the database.
 
-### 5.3 Authentication
+### 5.9 createRunner
+
+`createRunner(config)` constructs the configured `LLMRunner`
+implementation. Subclasses may override it to provide custom runner
+construction.
+
+### 5.10 Authentication
 
 Every route requires:
 
@@ -871,16 +1177,16 @@ Authorization: Bearer <apiKey>
 The bearer scheme is case-insensitive. The key comparison uses a
 timing-safe comparison.
 
-### 5.4 Routes
+### 5.11 Routes
 
 | Method | Path | Behavior |
 |---|---|---|
 | `POST` | `/prompt` | Submit `{ "prompt": string }` through `queue.submit`. Returns `202`. |
-| `GET` | `/prompt/:id` | Read one record through `db.readPrompt`. Optional `?wait=<ms>` uses long polling. |
+| `GET` | `/prompt/:id` | Read one record through `db.read`. Optional `?wait=<ms>` uses long polling. |
 | `GET` | `/prompt/:id/events` | Open a live-only SSE stream. |
 | `DELETE` | `/prompt/:id` | Cancel a pending record through `queue.cancel`. |
-| `GET` | `/prompts` | List records through `db.listPrompts`. |
-| `GET` | `/prompts/:status` | Resolve the status label to a status code and list matching records through `db.listPrompts`. |
+| `GET` | `/prompts` | Return one pagination page through `db.paginate`. |
+| `GET` | `/prompts/:status` | Resolve the status label to a status code and return one pagination page through `db.paginate`. |
 
 Successful JSON responses use:
 
@@ -903,7 +1209,7 @@ Errors use:
 
 The HTTP serialization of `CTGPromptQueueRecord` excludes `info`.
 
-### 5.5 Long Poll
+### 5.12 Long Poll
 
 `GET /prompt/:id?wait=<ms>` waits up to `wait` milliseconds for the
 record to finish.
@@ -911,7 +1217,7 @@ record to finish.
 Steps:
 
 1. Clamp `wait` into `0..maxWaitMs`.
-2. Read the record through `db.readPrompt(id)`.
+2. Read the record through `db.read(id)`.
 3. If `statusCode` is `3`, `4`, or `5`, return it immediately.
 4. Register a server-owned waiter for ID `id`.
 5. Re-read the record to close the race with terminal completion.
@@ -922,7 +1228,7 @@ Steps:
 The response status is `200` whether the prompt finished or the wait
 elapsed.
 
-### 5.6 SSE
+### 5.13 SSE
 
 `GET /prompt/:id/events` opens a live-only Server-Sent Events stream.
 
@@ -945,7 +1251,7 @@ data: <JSON payload>
 
 SSE behavior:
 
-1. Validate and read the record through `db.readPrompt(id)`.
+1. Validate and read the record through `db.read(id)`.
 2. Register the response as a live sink for ID `id`.
 3. Write future `CTGPromptQueueStreamMessage` values received from the
    queue.
@@ -956,7 +1262,7 @@ SSE behavior:
 No stream replay is guaranteed. A reconnecting client reads the current
 record with `GET /prompt/:id`.
 
-### 5.7 Listing
+### 5.14 Pagination
 
 `GET /prompts` and `GET /prompts/:status` parse these query fields:
 
@@ -967,7 +1273,7 @@ record with `GET /prompt/:id`.
 | `status` | Route parameter. Must resolve to one concrete `CTGPromptQueueStatusLabel`. The server uppercases the route value, validates it, and resolves it to `statusCode` with `CTGPromptQueue.statusCodeOf(status)`. |
 
 The server builds a `CTGPromptPagination` object and calls
-`db.listPrompts({ statusCode, limit, before })`. Successful responses
+`db.paginate({ statusCode, limit, before })`. Successful responses
 return the resulting `CTGPromptPaginationPage`.
 
 ---
@@ -1095,22 +1401,30 @@ type CTGPromptServerErrorCode =
 | `CTGPromptRequestErrorCode` | HTTP request error codes. |
 | `CTGPromptOutcomeErrorCode` | Durable prompt outcome error codes. |
 
-Public surface:
+Constructor:
+
+```ts
+class CTGPromptServerError extends Error {
+    constructor(label: CTGPromptServerErrorLabel, msg: string, data?: Record<string, unknown>);
+}
+```
+
+Static fields:
 
 ```ts
 class CTGPromptServerError extends Error {
     static readonly TYPES: Readonly<Record<string, number>>;
+}
+```
 
-    readonly label: CTGPromptServerErrorLabel;
-    readonly code: CTGPromptServerErrorCode;
-    readonly msg: string;
-    readonly data: Readonly<Record<string, unknown>>;
-    readonly status: number | null;
+| Field | Type | Visibility | Meaning |
+|---|---|---|---|
+| `TYPES` | `Readonly<Record<string, number>>` | public static readonly | Label-to-code map for every supported error label. |
 
-    constructor(label: CTGPromptServerErrorLabel, msg: string, data?: Record<string, unknown>);
+Static methods:
 
-    toResult(): { label: string; code: number; message: string };
-
+```ts
+class CTGPromptServerError extends Error {
     static is(value: unknown): value is CTGPromptServerError;
     static isLabel(label: string): boolean;
     static isCode(code: number): boolean;
@@ -1119,6 +1433,76 @@ class CTGPromptServerError extends Error {
     static statusOf(label: CTGPromptServerErrorLabel): number | null;
 }
 ```
+
+Instance fields:
+
+```ts
+class CTGPromptServerError extends Error {
+    readonly label: CTGPromptServerErrorLabel;
+    readonly code: CTGPromptServerErrorCode;
+    readonly msg: string;
+    readonly data: Readonly<Record<string, unknown>>;
+    readonly status: number | null;
+}
+```
+
+| Field | Type | Visibility | Meaning |
+|---|---|---|---|
+| `label` | `CTGPromptServerErrorLabel` | public readonly | Stable human-readable error label. |
+| `code` | `CTGPromptServerErrorCode` | public readonly | Stable numeric error code. |
+| `msg` | `string` | public readonly | Human-readable error message. |
+| `data` | `Readonly<Record<string, unknown>>` | public readonly | Structured diagnostic data. |
+| `status` | `number \| null` | public readonly | HTTP status for request errors, or `null` for non-HTTP outcome errors. |
+
+Instance methods:
+
+```ts
+class CTGPromptServerError extends Error {
+    toResult(): { label: string; code: number; message: string };
+}
+```
+
+### 6.1 constructor
+
+`constructor(label, msg, data?)` creates a typed server error. It resolves
+`code` and `status` from `label`.
+
+### 6.2 TYPES
+
+`TYPES` maps every supported error label to its stable numeric error
+code.
+
+### 6.3 is
+
+`is(value)` returns whether `value` is a `CTGPromptServerError`.
+
+### 6.4 isLabel
+
+`isLabel(label)` returns whether `label` is a supported
+`CTGPromptServerErrorLabel`.
+
+### 6.5 isCode
+
+`isCode(code)` returns whether `code` is a supported
+`CTGPromptServerErrorCode`.
+
+### 6.6 codeOf
+
+`codeOf(label)` resolves a supported error label to its numeric error
+code.
+
+### 6.7 labelOf
+
+`labelOf(code)` resolves a supported numeric error code to its label.
+
+### 6.8 statusOf
+
+`statusOf(label)` resolves a supported error label to its HTTP status, or
+`null` when the label is not an HTTP request error.
+
+### 6.9 toResult
+
+`toResult()` returns the JSON-safe error envelope payload.
 
 Request error label/code map:
 
@@ -1178,7 +1562,7 @@ Required conformance coverage:
 | Long poll | `wait` resolves on terminal state or timeout and returns current record. |
 | SSE | Connected clients receive live stream event messages and terminal closure for `statusCode` 3, 4, or 5. |
 | Reconnect | Reconnecting clients recover current state through `GET /prompt/:id`. |
-| Listing | Server parses pagination and calls `CTGPromptDB.listPrompts`. |
+| Pagination | Server parses pagination and calls `CTGPromptDB.paginate`. |
 | Errors | HTTP error envelopes have exact `success` and `result` shapes, with `result.label`, `result.code`, and `result.message`. |
 
 ---
