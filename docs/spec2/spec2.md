@@ -1,0 +1,279 @@
+# ctg-ts-prompt-server spec2
+
+**Status:** proposed architecture specification.
+
+`ctg-ts-prompt-server` is a durable prompt queue service for one
+configured `ctg-ai-agent-proc` runner. It exposes prompt submission and
+status over HTTP, stores prompt lifecycle state in SQLite, dispatches
+work through a queue, and streams live runner output to connected SSE
+clients.
+
+This document explains the general architecture and operational flow.
+Exact contracts live in the focused spec files:
+
+| Area | Spec |
+|---|---|
+| Database schema | [spec2.db.md](./spec2.db.md) |
+| Class index | [spec2.classes.md](./spec2.classes.md) |
+| Type ownership | [spec2.types.md](./spec2.types.md) |
+| `CTGPromptServerDB` | [class](./classes/CTGPromptServerDB/class.md), [types](./classes/CTGPromptServerDB/types.md) |
+| `CTGPromptServerQueue` | [class](./classes/CTGPromptServerQueue/class.md), [types](./classes/CTGPromptServerQueue/types.md) |
+| `CTGPromptServer` | [class](./classes/CTGPromptServer/class.md), [types](./classes/CTGPromptServer/types.md) |
+| `CTGPromptServerError` | [class](./classes/CTGPromptServerError/class.md), [types](./classes/CTGPromptServerError/types.md) |
+| `CTGPromptServerRequestError` | [class](./classes/CTGPromptServerRequestError/class.md), [types](./classes/CTGPromptServerRequestError/types.md) |
+
+---
+
+## Architecture
+
+The service has four primary boundaries:
+
+| Boundary | Responsibility |
+|---|---|
+| `CTGPromptServer` | Owns HTTP, authentication, request validation, SSE clients, long-poll waiters, startup, and shutdown. |
+| `CTGPromptServerQueue` | Owns prompt validation, durable lifecycle transitions, runner dispatch, concurrency, active runners, and live stream messages. |
+| `CTGPromptServerDB` | Owns SQLite access for prompt queue records. It does not know about HTTP, SSE, runners, or live clients. |
+| `CTGPromptServerError` | Owns normalized error labels, application error codes, and JSON-safe error results. |
+| `CTGPromptServerRequestError` | Owns HTTP status values for request errors. |
+
+The durable unit is a `CTGPromptServerQueueRecord`. The upstream
+`ctg-ai-agent-proc` `LLMPrompt` type is a prompt-construction object; it
+is not stored by this service. This service stores raw prompt text and
+the lifecycle state for one submitted queue record.
+
+Spec2 keeps class-owned types beside their owning class. General
+cross-class type policy is described in [spec2.types.md](./spec2.types.md).
+
+---
+
+## Data Model
+
+SQLite is the durable source of truth for submitted prompts. The spec2
+schema contains one `prompts` table and one claim/list index; the exact
+DDL is defined in [spec2.db.md](./spec2.db.md).
+
+Prompt records move through five lifecycle states:
+
+| State | Code | Terminal | Meaning |
+|---|---:|---|---|
+| `PENDING` | `1` | no | The prompt has been accepted and is waiting to be claimed. |
+| `ACTIVE` | `2` | no | The queue claimed the prompt and has an active runner. |
+| `DONE` | `3` | yes | The runner completed successfully. |
+| `ERROR` | `-1` | yes | The prompt failed with a stored prompt failure code. |
+| `CANCELLED` | `5` | yes | The prompt was cancelled before being claimed. |
+
+The database stores numeric prompt status codes and integer application
+error codes. Queue status codes are defined by `CTGPromptServerQueue.STATUS`;
+all supported error labels and error codes are defined by
+`CTGPromptServerError.CODE`.
+
+The initial spec2 schema does not store per-event stream history. Live
+SSE messages are delivered by `CTGPromptServer`; reconnecting clients
+recover current prompt state through `GET /prompt/:id`.
+
+---
+
+## Runtime Flow
+
+### Startup
+
+`CTGPromptServer.init(config)` validates configuration enough to build
+the server object and open the database. It does not bind the listener or
+start queue processing.
+
+`server.start(port)` performs runtime startup:
+
+1. Construct the configured runner.
+2. Construct `CTGPromptServerQueue`.
+3. Recover records left `ACTIVE` by a previous process by marking them
+   interrupted.
+4. Start queue processing.
+5. Bind the HTTP listener.
+
+Recovery runs before new claims so stale active records cannot be
+silently rerun.
+
+### Submission
+
+`POST /prompt` submits raw prompt text. The server validates the request
+envelope and delegates prompt validation to `CTGPromptServerQueue.submit(...)`.
+
+The queue:
+
+1. Validates that the prompt is a non-empty string within
+   `maxPromptBytes`.
+2. Persists a pending record with `CTGPromptServerDB.create(...)`.
+3. Emits a live `pending` stream message.
+4. Queues work if processing is started.
+5. Returns the created `CTGPromptServerQueueRecord`.
+
+Prompt text is stored and executed byte-for-byte as submitted.
+
+### Dispatch
+
+`CTGPromptServerQueue` owns scheduling and concurrency. While active runner
+count is below `concurrency`, it claims pending records with
+`CTGPromptServerDB.claimNext()` and starts runner execution through its
+queue-owned agent workflow.
+
+Claiming is atomic and FIFO by prompt ID. Cancellation and claiming must
+not both win for the same row.
+
+### Running
+
+For each claimed record, the queue starts `runner.run(record.prompt,
+...)`, creates an `ActiveRunner`, and stores it by prompt ID. A
+synchronous throw from `runner.run(...)` is normalized into a rejected
+runner result promise.
+
+Runner stream events are converted into live stream messages:
+
+| Source event | Live message |
+|---|---|
+| `LLMRunnerOutputEvent` | `output` |
+| structured event with `payload` | `stream` |
+| other stream event | `stream` with raw payload |
+
+For `streamMode = "raw"`, stdout chunks contribute to the stored
+response. For `streamMode = "events"`, supported Claude or Codex
+assistant text contributes to the stored response. Response fragments are
+persisted with `CTGPromptServerDB.append(...)` before the corresponding live
+message is emitted.
+
+### Finish
+
+When the runner settles, `CTGPromptServerQueue` writes one terminal outcome:
+
+| Outcome | Stored status | Error code |
+|---|---|---|
+| Success | `DONE` / `3` | none |
+| Runner failure | `ERROR` / `-1` | `RUNNER_FAILED` / `4` |
+| Database failure | `ERROR` / `-1` | `DATABASE_FAILED` / `3` |
+| Internal service failure | `ERROR` / `-1` | `INTERNAL_ERROR` / `2` |
+| Startup recovery interruption | `ERROR` / `-1` | `PROMPT_INTERRUPTED` / `5` |
+| Unknown caught failure | `ERROR` / `-1` | `UNKNOWN_ERROR` / `15` |
+
+After a terminal outcome, the queue emits the terminal live message,
+removes the active runner, notifies the server that the prompt finished,
+and attempts to claim more work if processing is still started.
+
+### Cancellation
+
+`DELETE /prompt/:id` cancels only pending records. Unknown records return
+`PROMPT_NOT_FOUND`; active or terminal records return
+`CANCEL_NOT_ALLOWED`.
+
+Successful cancellation is durable, emits a `cancelled` live message, and
+wakes any server-owned waiters for that prompt.
+
+### Reads And Pagination
+
+`GET /prompt/:id` reads the current durable prompt record. With
+`?wait=<ms>`, the server long-polls until the prompt reaches a terminal
+state or the clamped wait duration elapses.
+
+`GET /prompts` and `GET /prompts/:status` list records newest first with
+cursor pagination. Pagination details and record shape are owned by
+`CTGPromptServerDB` and its types.
+
+### SSE
+
+`GET /sse/:id` opens an SSE stream for live prompt messages.
+`CTGPromptServer` owns response sinks, keep-alive comments, client
+disconnect handling, and terminal stream closure.
+
+Because initial spec2 does not persist event history, SSE is live-only.
+Clients that reconnect should read the durable prompt record to recover
+current state.
+
+### Shutdown
+
+`server.close()` stops accepting HTTP work, closes open SSE streams,
+stops queue processing, and closes the database. Queue shutdown disables
+new claims and waits for active runner results plus queued terminal tasks
+to settle according to the class contract.
+
+---
+
+## Error Model
+
+Spec2 separates four error domains:
+
+1. Request errors reject an HTTP request.
+2. Database errors originate from durable storage operations.
+3. Runner errors originate from the configured upstream `LLMRunner`.
+4. Prompt errors are terminal prompt states stored on durable prompt
+   records.
+5. Internal errors report invalid configuration or unexpected service
+   failures.
+
+`CTGPromptServerError` is the normalized error class. It owns
+`toResponse()` for the standard error response body. HTTP-facing request
+errors are represented by `CTGPromptServerRequestError`, which adds the
+`status` instance field. Runner, database, prompt, and internal errors
+derive labels from `CTGPromptServerError.CODE`; prompt error codes are
+stored on prompt records when `statusCode = -1`.
+
+Every HTTP JSON response uses the standard envelope:
+
+```json
+{ "success": true, "result": {} }
+```
+
+Errors use:
+
+```json
+{ "success": false, "result": { "code": 10, "message": "Invalid query." } }
+```
+
+The exact HTTP-facing error and prompt failure tables belong to
+[CTGPromptServerError types](./classes/CTGPromptServerError/types.md).
+
+---
+
+## Operational Model
+
+One server process owns one database file. SQLite WAL supports concurrent
+readers, but spec2 does not define multiple active service workers
+claiming from the same database.
+
+Bearer authentication is the HTTP protection boundary. Every route
+requires `Authorization: Bearer <apiKey>`.
+
+Runner configuration describes one configured runner for the server. The
+service does not expose per-request runner choice, a runner registry, or
+prompt templating.
+
+Maintenance operations are script-level operations over the SQLite
+database:
+
+| Operation | Behavior |
+|---|---|
+| purge finished | Delete terminal records. |
+| purge all | Delete every prompt record. |
+| reset schema | Drop and recreate the schema. |
+
+Maintenance SQL is specified in [spec2.db.md](./spec2.db.md). Destructive
+maintenance is intended for a stopped server.
+
+---
+
+## Not Supported
+
+Spec2 intentionally does not define:
+
+1. Multiple runner registry.
+2. Per-request runner choice.
+3. Prompt templates.
+4. Metrics routes.
+5. Health routes.
+6. Durable per-event stream history.
+7. Multiple active service workers sharing one queue database.
+
+---
+
+## Conformance
+
+Conformance requirements should live in a dedicated
+`spec2.conformance.md` document. Class documents define behavior and
+surface area; conformance documents define how that behavior is proven.

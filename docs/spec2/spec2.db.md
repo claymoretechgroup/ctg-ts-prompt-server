@@ -3,8 +3,8 @@
 **Status:** proposed standalone database specification.
 
 This document specifies the SQLite schema for spec2. Type declarations
-are defined in `docs/spec2.types.md`. Class behavior is defined in
-`docs/spec2.classes.md`.
+are defined in [spec2.types.md](./spec2.types.md). Class behavior is
+defined in [spec2.classes.md](./spec2.classes.md).
 
 ---
 
@@ -17,12 +17,12 @@ one table for prompt queue records and one index for claim/list access.
 CREATE TABLE IF NOT EXISTS prompts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     status_code   INTEGER NOT NULL CHECK (
-        status_code IN (1, 2, 3, 4, 5)
+        status_code IN (-1, 1, 2, 3, 5)
     ),
     prompt        TEXT    NOT NULL,
     response      TEXT    NOT NULL DEFAULT '',
     error_code    INTEGER CHECK (
-        error_code IS NULL OR error_code IN (1013, 1014, 1015)
+        error_code IS NULL OR error_code IN (2, 3, 4, 5, 15)
     ),
     error_message TEXT,
     info          TEXT,
@@ -31,9 +31,9 @@ CREATE TABLE IF NOT EXISTS prompts (
     started_at    INTEGER,
     finished_at   INTEGER,
     CHECK (
-        (status_code = 4 AND error_code IS NOT NULL AND error_message IS NOT NULL)
+        (status_code = -1 AND error_code IS NOT NULL AND error_message IS NOT NULL)
         OR
-        (status_code <> 4 AND error_code IS NULL AND error_message IS NULL)
+        (status_code <> -1 AND error_code IS NULL AND error_message IS NULL)
     )
 );
 
@@ -46,20 +46,20 @@ Column meanings:
 | Column | Meaning |
 |---|---|
 | `id` | Stable queue record ID. It is the HTTP ID, pagination cursor, and active-run map key. |
-| `status_code` | Stable lifecycle status code. Valid status codes are `1` pending, `2` active, `3` done, `4` error, and `5` cancelled. |
+| `status_code` | Stable lifecycle status code. Valid status codes are `1` pending, `2` active, `3` done, `-1` error, and `5` cancelled. |
 | `prompt` | Raw prompt text exactly as submitted by the client. |
 | `response` | Accumulated response text while running, overwritten by the final runner result on success. |
-| `error_code` | Outcome error code when `status_code = 4`; otherwise `NULL`. Valid outcome codes are `1013`, `1014`, and `1015`. |
-| `error_message` | Outcome error message when `status_code = 4`; otherwise `NULL`. |
+| `error_code` | Prompt failure application code when `status_code = -1`; otherwise `NULL`. Valid stored prompt failure codes are `2`, `3`, `4`, `5`, and `15`. |
+| `error_message` | Prompt failure message when `status_code = -1`; otherwise `NULL`. |
 | `info` | JSON diagnostics for operators. It is not serialized on HTTP prompt responses. |
 | `runner` | Runner type metadata. It may remain `NULL` for the initial single-runner service. |
 | `created_at` | Epoch milliseconds when the record was submitted. |
 | `started_at` | Epoch milliseconds when the record was claimed. `NULL` until active. |
 | `finished_at` | Epoch milliseconds when the record entered a terminal state. `NULL` until finished. |
 
-The database enforces the finite status-code set, the finite outcome
-error-code set, and the rule that `error_code` / `error_message` are
-present only for `status_code = 4`.
+The database enforces the finite status-code set, the finite prompt
+failure-code set, and the rule that `error_code` / `error_message` are
+present only for `status_code = -1`.
 
 SQLite pragmas applied on open:
 
@@ -75,14 +75,14 @@ through `GET /prompt/:id`.
 
 ## 2. Maintenance SQL
 
-Maintenance operations are script-level SQL tasks, not `CTGPromptDB`
+Maintenance operations are script-level SQL tasks, not `CTGPromptServerDB`
 runtime methods.
 
 Purge finished records:
 
 ```sql
 DELETE FROM prompts
-WHERE status_code IN (3, 4, 5);
+WHERE status_code IN (-1, 3, 5);
 ```
 
 Purge all records:
