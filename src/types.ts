@@ -154,9 +154,9 @@ export interface CTGPromptServerConfig {
     maxLimit?: number;                                             // Maximum list size
 }
 
-// TYPE :: {db:ctgPromptDB, subscribers:ctgPromptSubscribers, runner:llmRunner, runnerKind:runnerKind, concurrency:NUMBER, maxPromptBytes:NUMBER, streamMode:streamMode, maxWaitMs:NUMBER, defaultLimit:NUMBER, maxLimit:NUMBER}
+// TYPE :: {db:ctgPromptServerDB, subscribers:ctgPromptSubscribers, runner:llmRunner, runnerKind:runnerKind, concurrency:NUMBER, maxPromptBytes:NUMBER, streamMode:streamMode, maxWaitMs:NUMBER, defaultLimit:NUMBER, maxLimit:NUMBER}
 // Queue config with all defaults resolved.
-export interface CTGPromptQueueConfig {
+export interface CTGPromptServerQueueConfig {
     db: {                                                          // Durable prompt database
         insertPrompt(prompt: string): PromptRecord;
         readPrompt(id: number): PromptRecord | undefined;
@@ -191,8 +191,16 @@ export interface CTGPromptQueueConfig {
 }
 
 // TYPE :: {path:STRING, initDB:BOOLEAN?}
-// Database config accepted by CTGPromptDB.init().
-export interface CTGPromptDBConfig {
+// Database config accepted by CTGPromptServerDB.init().
+export interface CTGPromptServerDBConfig {
     path: string;                                                  // SQLite file path or :memory:
     initDB?: boolean;                                               // Whether to create schema when absent
 }
+
+// TYPE :: ctgPromptServerQueueConfig
+// Backward-compatible v1 alias for the spec2 queue config name.
+export type CTGPromptQueueConfig = CTGPromptServerQueueConfig;
+
+// TYPE :: ctgPromptServerDBConfig
+// Backward-compatible v1 alias for the spec2 DB config name.
+export type CTGPromptDBConfig = CTGPromptServerDBConfig;

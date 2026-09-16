@@ -7,7 +7,7 @@ import type {
     AppendedEvent,                                           // Event append result
     ClaimedPrompt,                                           // Claim result
     CTGPromptEventSink,                                      // Event sink for subscriptions
-    CTGPromptQueueConfig,                                    // Queue factory config
+    CTGPromptServerQueueConfig,                                    // Queue factory config
     CTGPromptSubscription,                                   // Subscription handle
     EventRecord,                                             // Durable event record
     PromptEventName,                                         // Durable event names
@@ -39,7 +39,7 @@ interface ReplaySubscription extends CTGPromptSubscription {
  */
 
 // Prompt dispatcher and runner coordinator.
-export default class CTGPromptQueue {
+export default class CTGPromptServerQueue {
 
     /* Static Fields */
     static readonly STATUS: Readonly<Record<string, number>> = Object.freeze({
@@ -51,8 +51,8 @@ export default class CTGPromptQueue {
     });
 
     /* Instance Fields */
-    private readonly _db: CTGPromptQueueConfig["db"];                     // Durable prompt store
-    private readonly _subscribers: CTGPromptQueueConfig["subscribers"];   // Live event fan-out
+    private readonly _db: CTGPromptServerQueueConfig["db"];                     // Durable prompt store
+    private readonly _subscribers: CTGPromptServerQueueConfig["subscribers"];   // Live event fan-out
     private readonly _runner: LLMRunner;                                  // Upstream runner
     private readonly _runnerKind: RunnerKind;                             // Kind recorded in claims
     private readonly _concurrency: number;                                // Maximum active runs
@@ -64,9 +64,9 @@ export default class CTGPromptQueue {
     private readonly _active: Set<number>;                                // Prompt ids currently executing
     private readonly _running: Set<Promise<void>>;                        // Execution promises for drain()
 
-    // CONSTRUCTOR :: ctgPromptQueueConfig -> this
+    // CONSTRUCTOR :: ctgPromptServerQueueConfig -> this
     // Wires the queue to storage, subscribers, and a runner.
-    private constructor(config: CTGPromptQueueConfig) {
+    private constructor(config: CTGPromptServerQueueConfig) {
         this._db = config.db;
         this._subscribers = config.subscribers;
         this._runner = config.runner;
@@ -133,7 +133,7 @@ export default class CTGPromptQueue {
                 status: record.status
             });
         }
-        if (CTGPromptQueue._isFinished(record.status)) {
+        if (CTGPromptServerQueue._isFinished(record.status)) {
             throw new CTGPromptServerError("CANCEL_NOT_ALLOWED", "The prompt is already finished.", {
                 id,
                 status: record.status
@@ -166,7 +166,7 @@ export default class CTGPromptQueue {
         const clampedWaitMs = Math.min(Math.max(waitMs, 0), this._maxWaitMs);
         const first = this.read(id);
 
-        if (CTGPromptQueue._isFinished(first.status)) {
+        if (CTGPromptServerQueue._isFinished(first.status)) {
             return first;
         }
 
@@ -182,7 +182,7 @@ export default class CTGPromptQueue {
         });
         const second = this.read(id);
 
-        if (CTGPromptQueue._isFinished(second.status)) {
+        if (CTGPromptServerQueue._isFinished(second.status)) {
             subscription.close();
             return second;
         }
@@ -223,7 +223,7 @@ export default class CTGPromptQueue {
         }
 
         const last = events.at(-1);
-        if (last === undefined && CTGPromptQueue._isFinished(record.status)) {
+        if (last === undefined && CTGPromptServerQueue._isFinished(record.status)) {
             sink.end();
         }
 
@@ -381,26 +381,26 @@ export default class CTGPromptQueue {
     // Extracts response text contributed by one stream event.
     private _responseContribution(name: PromptEventName, payload: unknown): string | undefined {
         if (this._streamMode === "raw") {
-            if (name === "output" && CTGPromptQueue._isObject(payload) && payload.stream === "stdout" && typeof payload.chunk === "string") {
+            if (name === "output" && CTGPromptServerQueue._isObject(payload) && payload.stream === "stdout" && typeof payload.chunk === "string") {
                 return payload.chunk;
             }
 
             return undefined;
         }
 
-        if (name !== "stream" || !CTGPromptQueue._isObject(payload) || !("payload" in payload)) {
+        if (name !== "stream" || !CTGPromptServerQueue._isObject(payload) || !("payload" in payload)) {
             return undefined;
         }
 
         return this._runnerKind === "claude"
-            ? CTGPromptQueue._extractClaudeText(payload.payload)
-            : CTGPromptQueue._extractCodexText(payload.payload);
+            ? CTGPromptServerQueue._extractClaudeText(payload.payload)
+            : CTGPromptServerQueue._extractCodexText(payload.payload);
     }
 
     // METHOD :: NUMBER, UNKNOWN -> VOID
     // Records a runner failure outcome.
     private _finishRunnerError(id: number, cause: unknown): void {
-        const outcome = CTGPromptQueue._runnerOutcome(cause);
+        const outcome = CTGPromptServerQueue._runnerOutcome(cause);
         const appended = this._db.finishPrompt(id, {
             status: "error",
             errorType: "RUNNER",
@@ -456,16 +456,16 @@ export default class CTGPromptQueue {
      *
      */
 
-    // Static Factory Method :: ctgPromptQueueConfig -> ctgPromptQueue
+    // Static Factory Method :: ctgPromptServerQueueConfig -> ctgPromptServerQueue
     // Creates a prompt queue.
-    static init(config: CTGPromptQueueConfig): CTGPromptQueue {
+    static init(config: CTGPromptServerQueueConfig): CTGPromptServerQueue {
         return new this(config);
     }
 
     // METHOD :: NUMBER -> STRING
     // Returns the spec2 label for a durable queue status code.
     static statusOf(code: number): string {
-        for (const [label, value] of Object.entries(CTGPromptQueue.STATUS)) {
+        for (const [label, value] of Object.entries(CTGPromptServerQueue.STATUS)) {
             if (value === code) {
                 return label;
             }
@@ -522,12 +522,12 @@ export default class CTGPromptQueue {
     // METHOD :: UNKNOWN -> STRING?
     // Extracts Claude assistant text from a native payload.
     private static _extractClaudeText(payload: unknown): string | undefined {
-        if (!CTGPromptQueue._isObject(payload) || !CTGPromptQueue._isObject(payload.message) || !Array.isArray(payload.message.content)) {
+        if (!CTGPromptServerQueue._isObject(payload) || !CTGPromptServerQueue._isObject(payload.message) || !Array.isArray(payload.message.content)) {
             return undefined;
         }
 
         const text = payload.message.content
-            .map((item: unknown) => CTGPromptQueue._isObject(item) && typeof item.text === "string" ? item.text : "")
+            .map((item: unknown) => CTGPromptServerQueue._isObject(item) && typeof item.text === "string" ? item.text : "")
             .join("");
 
         return text === "" ? undefined : text;
@@ -536,7 +536,7 @@ export default class CTGPromptQueue {
     // METHOD :: UNKNOWN -> STRING?
     // Extracts Codex assistant text from a native payload.
     private static _extractCodexText(payload: unknown): string | undefined {
-        if (!CTGPromptQueue._isObject(payload) || !CTGPromptQueue._isObject(payload.item)) {
+        if (!CTGPromptServerQueue._isObject(payload) || !CTGPromptServerQueue._isObject(payload.item)) {
             return undefined;
         }
 
@@ -546,7 +546,7 @@ export default class CTGPromptQueue {
 
         if (payload.item.type === "message" && payload.item.role === "assistant" && Array.isArray(payload.item.content)) {
             const text = payload.item.content
-                .map((item: unknown) => CTGPromptQueue._isObject(item) && typeof item.text === "string" ? item.text : "")
+                .map((item: unknown) => CTGPromptServerQueue._isObject(item) && typeof item.text === "string" ? item.text : "")
                 .join("");
 
             return text === "" ? undefined : text;

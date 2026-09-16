@@ -1,13 +1,13 @@
 // Dependencies:
-import CTGPromptDB from "./CTGPromptDB/CTGPromptDB.js";                         // Public durable prompt database
-import CTGPromptQueue from "./CTGPromptQueue/CTGPromptQueue.js";                // Public prompt queue and dispatcher
+import CTGPromptServerDB from "./CTGPromptServerDB/CTGPromptServerDB.js";       // Public durable prompt database
+import CTGPromptServerQueue from "./CTGPromptServerQueue/CTGPromptServerQueue.js"; // Public prompt queue and dispatcher
 import CTGPromptServer from "./CTGPromptServer/CTGPromptServer.js";             // Public HTTP server entry point
 import CTGPromptServerError from "./CTGPromptServerError/CTGPromptServerError.js"; // Public typed error class
 import CTGPromptServerRequestError from "./CTGPromptServerRequestError/CTGPromptServerRequestError.js"; // Public HTTP request error class
 import CTGPromptSubscribers from "./CTGPromptSubscribers/CTGPromptSubscribers.js"; // Public subscriber registry
 
-const CTGPromptServerDB = CTGPromptDB;
-const CTGPromptServerQueue = CTGPromptQueue;
+const CTGPromptDB = CTGPromptServerDB;
+const CTGPromptQueue = CTGPromptServerQueue;
 
 export {
     CTGPromptDB,
@@ -20,6 +20,9 @@ export {
     CTGPromptSubscribers
 };
 
+export type CTGPromptDB = CTGPromptServerDB;
+export type CTGPromptQueue = CTGPromptServerQueue;
+
 export type {
     AppendedEvent,
     ClaimedPrompt,
@@ -27,7 +30,9 @@ export type {
     CTGPromptEventSink,
     CTGPromptQueueConfig,
     CTGPromptRunnerConfig,
+    CTGPromptServerDBConfig,
     CTGPromptServerConfig,
+    CTGPromptServerQueueConfig,
     CTGPromptSubscription,
     EventRecord,
     PromptEventName,

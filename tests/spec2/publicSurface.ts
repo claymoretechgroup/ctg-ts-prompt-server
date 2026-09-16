@@ -23,4 +23,15 @@ export default CTGTest.init("spec2 public surface")
         CTGPromptServerQueue: "function",
         CTGPromptServerError: "function",
         CTGPromptServerRequestError: "function"
+    }))
+    .assert("spec2 renamed DB and queue exports preserve class identity", async () => {
+        const mod = await loadPublicModule();
+
+        return {
+            dbName: typeof mod.CTGPromptServerDB === "function" ? mod.CTGPromptServerDB.name : null,
+            queueName: typeof mod.CTGPromptServerQueue === "function" ? mod.CTGPromptServerQueue.name : null
+        };
+    }, P.equals({
+        dbName: "CTGPromptServerDB",
+        queueName: "CTGPromptServerQueue"
     }));

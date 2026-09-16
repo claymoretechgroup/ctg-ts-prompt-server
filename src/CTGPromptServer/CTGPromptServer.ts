@@ -4,8 +4,8 @@ import type { Server } from "node:http";                            // HTTP list
 import type { AddressInfo } from "node:net";                        // Bound socket address returned by the listener
 import express from "express";                                     // HTTP routing and response host
 import { ClaudeRunner, CodexRunner } from "ctg-ai-agent-proc";      // Configured concrete runner classes
-import CTGPromptDB from "../CTGPromptDB/CTGPromptDB.js";            // Durable prompt database
-import CTGPromptQueue from "../CTGPromptQueue/CTGPromptQueue.js";   // Prompt dispatcher
+import CTGPromptServerDB from "../CTGPromptServerDB/CTGPromptServerDB.js"; // Durable prompt database
+import CTGPromptServerQueue from "../CTGPromptServerQueue/CTGPromptServerQueue.js"; // Prompt dispatcher
 import CTGPromptServerError from "../CTGPromptServerError/CTGPromptServerError.js"; // Typed server errors
 import CTGPromptSubscribers from "../CTGPromptSubscribers/CTGPromptSubscribers.js"; // Live event subscribers
 
@@ -61,9 +61,9 @@ export default class CTGPromptServer {
     /* Instance Fields */
     private readonly _config: ResolvedServerConfig;                    // Resolved construction config
     private readonly _app: Express;                                    // Configured Express app
-    private readonly _db: CTGPromptDB;                                 // Durable prompt DB
+    private readonly _db: CTGPromptServerDB;                           // Durable prompt DB
     private readonly _subscribers: CTGPromptSubscribers;               // Subscriber registry
-    private _queue: CTGPromptQueue | null;                             // Queue created at start()
+    private _queue: CTGPromptServerQueue | null;                       // Queue created at start()
     private _listener: Server | null;                                  // HTTP listener created at start()
     private _started: boolean;                                         // Whether start() has run
 
@@ -71,7 +71,7 @@ export default class CTGPromptServer {
     // Creates a server over an already-open database and app.
     protected constructor(config: ResolvedServerConfig) {
         this._config = config;
-        this._db = CTGPromptDB.init({
+        this._db = CTGPromptServerDB.init({
             path: config.database,
             initDB: config.initDB
         });
@@ -94,15 +94,15 @@ export default class CTGPromptServer {
         return this._app;
     }
 
-    // GETTER :: VOID -> ctgPromptDB
+    // GETTER :: VOID -> ctgPromptServerDB
     // Returns the open prompt database.
-    get db(): CTGPromptDB {
+    get db(): CTGPromptServerDB {
         return this._db;
     }
 
-    // GETTER :: VOID -> ctgPromptQueue
+    // GETTER :: VOID -> ctgPromptServerQueue
     // Returns the started queue.
-    get queue(): CTGPromptQueue {
+    get queue(): CTGPromptServerQueue {
         if (this._queue === null) {
             throw new CTGPromptServerError("INTERNAL_ERROR", "Server has not been started.");
         }
@@ -138,7 +138,7 @@ export default class CTGPromptServer {
             });
         }
 
-        this._queue = CTGPromptQueue.init({
+        this._queue = CTGPromptServerQueue.init({
             db: this._db,
             subscribers: this._subscribers,
             runner,

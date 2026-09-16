@@ -7,7 +7,7 @@ import CTGPromptServerError from "../CTGPromptServerError/CTGPromptServerError.j
 import type {
     AppendedEvent,                                           // Append result shape
     ClaimedPrompt,                                           // Claim result shape
-    CTGPromptDBConfig,                                       // DB factory config
+    CTGPromptServerDBConfig,                                       // DB factory config
     EventRecord,                                             // Durable event record
     PromptEventName,                                         // Event name literals
     PromptListPage,                                          // Prompt list page
@@ -65,14 +65,14 @@ interface SchemaRow {
  */
 
 // Synchronous SQLite prompt and event store.
-export default class CTGPromptDB {
+export default class CTGPromptServerDB {
 
     /* Instance Fields */
     private readonly _db: DatabaseSync;                       // Underlying SQLite connection
 
-    // CONSTRUCTOR :: ctgPromptDBConfig -> this
+    // CONSTRUCTOR :: ctgPromptServerDBConfig -> this
     // Opens the SQLite database and creates or verifies the required schema.
-    private constructor(config: CTGPromptDBConfig) {
+    private constructor(config: CTGPromptServerDBConfig) {
         this._db = new DatabaseSync(config.path);
         this._db.exec("PRAGMA journal_mode = WAL;");
         this._db.exec("PRAGMA foreign_keys = ON;");
@@ -111,7 +111,7 @@ export default class CTGPromptDB {
     readPrompt(id: number): PromptRecord | undefined {
         const row = this._db.prepare("SELECT * FROM prompts WHERE id = ?").get(id) as PromptRow | undefined;
 
-        return row === undefined ? undefined : CTGPromptDB._promptFromRow(row);
+        return row === undefined ? undefined : CTGPromptServerDB._promptFromRow(row);
     }
 
     // METHOD :: promptListQuery -> promptListPage
@@ -138,7 +138,7 @@ export default class CTGPromptDB {
         `).all(...params, limit + 1) as unknown as PromptRow[];
         const hasNext = rows.length > limit;
         const pageRows = hasNext ? rows.slice(0, limit) : rows;
-        const prompts = pageRows.map((row) => CTGPromptDB._promptFromRow(row));
+        const prompts = pageRows.map((row) => CTGPromptServerDB._promptFromRow(row));
         const last = prompts.at(-1);
 
         return {
@@ -163,7 +163,7 @@ export default class CTGPromptDB {
                     return undefined;
                 }
 
-                const id = CTGPromptDB._number(row.id);
+                const id = CTGPromptServerDB._number(row.id);
                 const startedAt = Date.now();
                 const update = this._db.prepare(`
                     UPDATE prompts
@@ -284,7 +284,7 @@ export default class CTGPromptDB {
             `).run(message, now);
 
             for (const row of rows) {
-                const id = CTGPromptDB._number(row.id);
+                const id = CTGPromptServerDB._number(row.id);
 
                 this._appendEventInTransaction(id, "error", {
                     promptId: id,
@@ -314,7 +314,7 @@ export default class CTGPromptDB {
             ORDER BY sequence ASC
         `).all(id, afterSequence) as unknown as EventRow[];
 
-        return rows.map((row) => CTGPromptDB._eventFromRow(row));
+        return rows.map((row) => CTGPromptServerDB._eventFromRow(row));
     }
 
     // METHOD :: NUMBER -> NUMBER
@@ -356,7 +356,7 @@ export default class CTGPromptDB {
         this._transaction(() => {
             this._db.exec("DROP TABLE IF EXISTS events;");
             this._db.exec("DROP TABLE IF EXISTS prompts;");
-            this._db.exec(CTGPromptDB._schemaSQL());
+            this._db.exec(CTGPromptServerDB._schemaSQL());
         });
     }
 
@@ -381,7 +381,7 @@ export default class CTGPromptDB {
             return;
         }
         if (initDB) {
-            this._db.exec(CTGPromptDB._schemaSQL());
+            this._db.exec(CTGPromptServerDB._schemaSQL());
             return;
         }
 
@@ -409,7 +409,7 @@ export default class CTGPromptDB {
             throw new CTGPromptServerError("PROMPT_NOT_FOUND", "Prompt not found.");
         }
 
-        const sequence = CTGPromptDB._number(row.next_sequence);
+        const sequence = CTGPromptServerDB._number(row.next_sequence);
         const createdAt = Date.now();
 
         this._db.prepare(`
@@ -464,9 +464,9 @@ export default class CTGPromptDB {
      *
      */
 
-    // Static Factory Method :: ctgPromptDBConfig -> ctgPromptDB
+    // Static Factory Method :: ctgPromptServerDBConfig -> ctgPromptServerDB
     // Opens a prompt database.
-    static init(config: CTGPromptDBConfig): CTGPromptDB {
+    static init(config: CTGPromptServerDBConfig): CTGPromptServerDB {
         return new this(config);
     }
 
@@ -497,7 +497,7 @@ export default class CTGPromptDB {
     // METHOD :: UNKNOWN -> NUMBER?
     // Converts a nullable SQLite integer field.
     private static _nullableNumber(value: unknown): number | null {
-        return value === null || value === undefined ? null : CTGPromptDB._number(value);
+        return value === null || value === undefined ? null : CTGPromptServerDB._number(value);
     }
 
     // METHOD :: promptRow -> promptRecord
@@ -506,18 +506,18 @@ export default class CTGPromptDB {
         const info = typeof row.info === "string" ? JSON.parse(row.info) as Record<string, unknown> : null;
 
         return {
-            id: CTGPromptDB._number(row.id),
+            id: CTGPromptServerDB._number(row.id),
             status: row.status as PromptStatus,
             prompt: String(row.prompt),
             response: String(row.response),
-            errorType: CTGPromptDB._nullableString(row.error_type) as PromptOutcomeErrorType | null,
-            errorMessage: CTGPromptDB._nullableString(row.error_message),
+            errorType: CTGPromptServerDB._nullableString(row.error_type) as PromptOutcomeErrorType | null,
+            errorMessage: CTGPromptServerDB._nullableString(row.error_message),
             info: info === null ? null : Object.freeze(info),
-            runner: CTGPromptDB._nullableString(row.runner) as RunnerKind | null,
-            lastSequence: CTGPromptDB._number(row.next_sequence) - 1,
-            createdAt: CTGPromptDB._number(row.created_at),
-            startedAt: CTGPromptDB._nullableNumber(row.started_at),
-            finishedAt: CTGPromptDB._nullableNumber(row.finished_at)
+            runner: CTGPromptServerDB._nullableString(row.runner) as RunnerKind | null,
+            lastSequence: CTGPromptServerDB._number(row.next_sequence) - 1,
+            createdAt: CTGPromptServerDB._number(row.created_at),
+            startedAt: CTGPromptServerDB._nullableNumber(row.started_at),
+            finishedAt: CTGPromptServerDB._nullableNumber(row.finished_at)
         };
     }
 
@@ -525,11 +525,11 @@ export default class CTGPromptDB {
     // Maps a database event row to the public event shape.
     private static _eventFromRow(row: EventRow): EventRecord {
         return {
-            promptId: CTGPromptDB._number(row.prompt_id),
-            sequence: CTGPromptDB._number(row.sequence),
+            promptId: CTGPromptServerDB._number(row.prompt_id),
+            sequence: CTGPromptServerDB._number(row.sequence),
             name: row.name as PromptEventName,
             payload: JSON.parse(String(row.payload)) as unknown,
-            createdAt: CTGPromptDB._number(row.created_at)
+            createdAt: CTGPromptServerDB._number(row.created_at)
         };
     }
 }
