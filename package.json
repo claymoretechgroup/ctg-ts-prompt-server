@@ -1,7 +1,7 @@
 {
   "name": "ctg-ts-prompt-server",
-  "version": "1.0.0",
-  "description": "A durable prompt service exposing one LLM runner over HTTP, SQLite, and Server-Sent Events",
+  "version": "0.1.0",
+  "description": "A durable LLM prompt RESTful API using SQLite and SSE",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
