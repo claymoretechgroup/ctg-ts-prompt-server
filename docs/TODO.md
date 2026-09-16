@@ -46,10 +46,12 @@ Completed on `spec-v2`:
    - Ensure `CTGPromptServer` imports only the aggregate route binder.
    - Ensure route groups bind the documented paths.
    - Ensure fallback behavior remains last in binding order.
-5. Add tests for `CTGPromptServerValidation`.
-   - Static-only construction.
-   - Literal support for runner kind and stream mode.
-   - Integer, boolean, string, string-array, and env-object validation.
+5. Review `CTGPromptServerValidation` before building more behavior around it.
+   - Decide which helpers are actually needed by the spec-backed implementation.
+   - Separate type predicates from throwing validation/assertion methods.
+   - Consider whether runner kind and stream mode checks should be type predicates defined near the owning types.
+   - Remove one-off wrappers that do not earn shared helper status.
+   - Add tests only for the validation helpers that remain part of the spec-backed surface.
 6. Review `CTGPromptServer` close behavior against spec.
    - Stop listener.
    - Close all SSE sinks.
@@ -75,7 +77,8 @@ Completed on `spec-v2`:
    - `CTGPromptServerError`
    - `CTGPromptServerRequestError`
    - `CTGPromptServerValidation`
-6. Review `docs/spec2.conformance.md` after queue implementation catches up with the class docs.
+6. Confirm whether `CTGPromptServerValidation` should remain a class, become module-level predicate/assertion functions, or move predicates beside the owning type definitions.
+7. Review `docs/spec2.conformance.md` after queue implementation catches up with the class docs.
 
 ## Recommended Next Session Order
 
