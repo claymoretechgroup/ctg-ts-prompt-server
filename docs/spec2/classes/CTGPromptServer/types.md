@@ -44,6 +44,22 @@ interface CTGPromptRunnerConfig {
 | `timeout` | `number` | no | Runner timeout in milliseconds. |
 | `maxBuffer` | `number` | no | Maximum buffered runner output. |
 
+Validation:
+
+| Property | Rule |
+|---|---|
+| `type` | Must be `"claude"` or `"codex"`. |
+| `cwd` | When supplied, must be a non-empty string. |
+| `args` | When supplied, must be an array of strings. |
+| `env` | When supplied, must be an object and is a complete child-process environment replacement. |
+| `timeout` | When supplied, must be an integer greater than or equal to `0`. |
+| `maxBuffer` | When supplied, must be an integer greater than or equal to `1`. |
+
+When `timeout` is omitted, `CTGPromptServer.createRunner(...)` passes
+`600000` milliseconds. When `maxBuffer` is omitted, the server does not
+pass `maxBuffer`, allowing the selected runner implementation to use its
+own default.
+
 ### CTGPromptServerConfig
 
 ```ts
@@ -92,6 +108,27 @@ Defaults:
 | `maxWaitMs` | `30000` |
 | `defaultLimit` | `50` |
 | `maxLimit` | `200` |
+
+Validation:
+
+| Property | Rule |
+|---|---|
+| `runner` | Must be a valid `CTGPromptRunnerConfig`. The runner is validated by `CTGPromptServer.init(...)` and constructed by `start(...)`. |
+| `apiKey` | Must be a string with at least one non-whitespace character. Missing or empty keys throw `INVALID_CONFIG`; the server must not run open. |
+| `host` | When supplied, must be a non-empty string. |
+| `database` | When supplied, must be a non-empty string. |
+| `initDB` | When supplied, must be a boolean. |
+| `concurrency` | When supplied, must be an integer greater than or equal to `1`. |
+| `maxPromptBytes` | When supplied, must be an integer in `1..131071`. Larger values are rejected, not clamped. |
+| `streamMode` | When supplied, must be `"raw"` or `"events"`. |
+| `keepAliveMs` | When supplied, must be an integer greater than or equal to `1000`. |
+| `maxWaitMs` | When supplied, must be an integer greater than or equal to `0`. |
+| `defaultLimit` | When supplied, must be an integer greater than or equal to `1`. |
+| `maxLimit` | When supplied, must be an integer greater than or equal to `1`, and `defaultLimit <= maxLimit` after defaults are applied. |
+
+Invalid configuration throws `INVALID_CONFIG` / `1` during
+`CTGPromptServer.init(...)`, except invalid `port`, which is validated
+by `start(...)` before the listener is bound.
 
 `CTGPromptStreamMode` is owned by
 [CTGPromptServerQueue types](../CTGPromptServerQueue/types.md). Spec2 supports
@@ -150,25 +187,43 @@ The response body intentionally excludes error `data`, labels, and HTTP
 status. `data` remains available on the in-process error instance for
 inspection or logging; HTTP status is sent through the Express response.
 
+### CTGPromptRecord
+
+```ts
+interface CTGPromptRecord {
+    readonly id: number;
+    readonly statusCode: number;
+    readonly prompt: string;
+    readonly response: string;
+    readonly errorCode: number | null;
+    readonly errorMessage: string | null;
+    readonly runner: CTGPromptRunnerType | null;
+    readonly createdAt: number;
+    readonly startedAt: number | null;
+    readonly finishedAt: number | null;
+}
+```
+
+`CTGPromptRecord` is the public HTTP projection of the DB-owned
+`CTGPromptServerQueueRecord`.
+
 ### CTGPromptRecordResponse
 
 ```ts
 interface CTGPromptRecordResponse
-    extends CTGPromptServerSuccessResponse<CTGPromptServerQueueRecord> {}
+    extends CTGPromptServerSuccessResponse<CTGPromptRecord> {}
 ```
 
 `CTGPromptRecordResponse` is returned by routes whose successful payload
 is one prompt record, such as `POST /prompt`, `GET /prompt/:id`, and
-`DELETE /prompt/:id`. The prompt record shape is the DB-owned
-`CTGPromptServerQueueRecord`; the server does not define a separate prompt
-record projection in spec2.
+`DELETE /prompt/:id`.
 
 ### CTGPromptPageResponse
 
 ```ts
 interface CTGPromptPageResponse
     extends CTGPromptServerSuccessResponse<{
-        readonly records: CTGPromptServerQueueRecord[];
+        readonly records: CTGPromptRecord[];
         readonly nextBefore: number | null;
     }> {}
 ```

@@ -98,11 +98,15 @@ Authentication is Express middleware installed before all route groups.
 It accepts only `Authorization: Bearer <apiKey>`. The bearer scheme is
 case-insensitive; the key comparison must not leak useful timing
 differences. Missing, malformed, or mismatched credentials throw
-`UNAUTHORIZED` / `6`.
+`CTGPromptServerRequestError.unauthorized(...)`, which sends
+`UNAUTHORIZED` / `6` with HTTP status `401`.
 
 ### POST /prompt
 
-`POST /prompt` requires `Content-Type: application/json`.
+`POST /prompt` requires `Content-Type: application/json`. The JSON body
+reader accepts up to `1 MiB` / `1,048,576` bytes. A body over that limit
+throws `CTGPromptServerRequestError.invalidBody(...)`; the body limit is
+fixed and is not a configuration field.
 
 Request body:
 
@@ -112,41 +116,54 @@ Request body:
 
 The body must be a JSON object with a `prompt` property. Extra
 properties are ignored. The route delegates prompt validation to
-`CTGPromptServerQueue.submit(...)` and returns the created
-`CTGPromptServerQueueRecord` in a success response with status `202`.
+`CTGPromptServerQueue.submit(...)` and returns the created prompt as a
+public `CTGPromptRecord` success response with status `202`.
 
-Malformed JSON or invalid body shape throws `INVALID_BODY`.
-Non-JSON content type throws `INVALID_CONTENT_TYPE`.
+Malformed JSON or invalid body shape throws
+`CTGPromptServerRequestError.invalidBody(...)`, which sends
+`INVALID_BODY` / `8` with HTTP status `400`. Non-JSON content type
+throws `CTGPromptServerRequestError.invalidContentType(...)`, which
+sends `INVALID_CONTENT_TYPE` / `7` with HTTP status `415`.
+Invalid prompt text from `CTGPromptServerQueue.submit(...)` throws
+`CTGPromptServerRequestError.invalidPrompt(...)`, which sends
+`INVALID_PROMPT` / `9` with HTTP status `400`.
 
 ### GET /prompt/:id
 
 `GET /prompt/:id` parses `:id` as a base-10 integer. A malformed ID
-throws `INVALID_QUERY` before any prompt lookup.
+throws `CTGPromptServerRequestError.invalidQuery(...)` before any prompt
+lookup.
 
 Without `wait`, the route reads the current prompt record and returns it
-immediately.
+immediately as a public `CTGPromptRecord`.
 
 With `?wait=<ms>`, `wait` must be a base-10 integer greater than or
 equal to zero. The server long-polls until the prompt becomes terminal or
 the clamped wait duration elapses, then returns the current prompt
-record either way. The route never returns `202` for an elapsed wait; it
-returns `200` with the current record state.
+record as a public `CTGPromptRecord` either way. The route never returns
+`202` for an elapsed wait; it returns `200` with the current record
+state.
 
-Unknown IDs throw `PROMPT_NOT_FOUND`.
+Unknown IDs throw `CTGPromptServerRequestError.promptNotFound(...)`,
+which sends `PROMPT_NOT_FOUND` / `11` with HTTP status `404`.
 
 ### DELETE /prompt/:id
 
 `DELETE /prompt/:id` parses `:id` as a base-10 integer and delegates to
-`CTGPromptServerQueue.cancel(id)`.
+`CTGPromptServerQueue.cancel(id)`. Successful cancellation returns the
+cancelled prompt as a public `CTGPromptRecord`.
 
-Unknown IDs throw `PROMPT_NOT_FOUND`. Active or terminal prompts throw
-`CANCEL_NOT_ALLOWED`.
+Unknown IDs throw `CTGPromptServerRequestError.promptNotFound(...)`.
+Active or terminal prompts throw
+`CTGPromptServerRequestError.cancelNotAllowed(...)`, which sends
+`CANCEL_NOT_ALLOWED` / `12` with HTTP status `409`.
 
 ### GET /sse/:id
 
 `GET /sse/:id` parses `:id` as a base-10 integer and confirms the prompt
 exists before opening the SSE stream. Unknown IDs return a JSON
-`PROMPT_NOT_FOUND` response; no SSE headers are written.
+`PROMPT_NOT_FOUND` / `11` response with HTTP status `404`; no SSE
+headers are written.
 
 Once open, the response uses:
 
@@ -183,7 +200,10 @@ parameters:
 | `limit` | Optional page size, `1..maxLimit`. |
 | `before` | Optional cursor ID; returns records with IDs lower than this value. |
 
-Invalid `limit` or `before` values throw `INVALID_QUERY`.
+Invalid `limit` or `before` values throw
+`CTGPromptServerRequestError.invalidQuery(...)`.
+Successful responses return `CTGPromptPageResponse`; each record in
+`result.records` is a public `CTGPromptRecord`.
 
 ### GET /prompts/:status
 
@@ -191,12 +211,15 @@ Invalid `limit` or `before` values throw `INVALID_QUERY`.
 status filter. Supported status segments are `pending`, `active`,
 `done`, `error`, and `cancelled`.
 
-Unknown status values throw `INVALID_QUERY`.
+Unknown status values throw `CTGPromptServerRequestError.invalidQuery(...)`.
 
 ### Fallbacks
 
 If a path matches a supported route with the wrong HTTP method, return
-`METHOD_NOT_ALLOWED`. If no route path matches, return `NOT_FOUND`.
+`CTGPromptServerRequestError.methodNotAllowed(...)`, which sends
+`METHOD_NOT_ALLOWED` / `14` with HTTP status `405`. If no route path
+matches, return `CTGPromptServerRequestError.notFound(...)`, which sends
+`NOT_FOUND` / `13` with HTTP status `404`.
 
 The fallback route group must be bound after prompt, prompts, and SSE
 route groups.
@@ -287,7 +310,8 @@ Express app to `_config.host`.
 
 Startup order:
 
-1. Reject invalid ports with `INVALID_CONFIG`.
+1. Reject invalid ports with `INVALID_CONFIG`. `port` must be an integer
+   in `0..65535`; `0` asks the operating system for an ephemeral port.
 2. Reject a second start with `INTERNAL_ERROR`.
 3. Construct the configured runner through `createRunner(...)`.
 4. Construct `CTGPromptServerQueue` with server callbacks for live stream
@@ -307,7 +331,8 @@ close(): Promise<void>;
 ```
 
 Stops accepting HTTP connections, closes live SSE streams, wakes
-long-poll waiters, stops the queue, and closes the database.
+long-poll waiters, stops queue claims, and closes the database. It does
+not wait for active runner results to settle.
 
 Shutdown order:
 
@@ -315,10 +340,13 @@ Shutdown order:
 2. Stop the HTTP listener when it exists.
 3. Close all live SSE sinks.
 4. Resolve all long-poll waiters.
-5. Stop the queue when it exists.
+5. Stop the queue when it exists, disabling new claims without draining
+   active runners.
 6. Close the database.
 
-`close()` is idempotent.
+`close()` is idempotent. Rows still `ACTIVE` after close are handled by
+startup recovery on the next `start(...)`, which marks them interrupted.
+Graceful drain shutdown is future scope, not part of initial spec2.
 
 ### INSTANCE :: ctgPromptServer.openSSE
 
@@ -384,6 +412,11 @@ supplied, is a complete child environment replacement. If omitted, the
 runner inherits the server process environment according to
 `ctg-ai-agent-proc` behavior.
 
+`createRunner(...)` passes `timeout` as the configured value or
+`600000` milliseconds when omitted. It passes `maxBuffer` only when the
+caller supplied it, so the selected runner implementation keeps its own
+default otherwise.
+
 ---
 
 ## Private Methods
@@ -405,3 +438,5 @@ static init(config: CTGPromptServerConfig): CTGPromptServer;
 
 Validates and resolves `CTGPromptServerConfig`, then constructs a
 `CTGPromptServer`. Invalid config throws `INVALID_CONFIG` / `1`.
+Validation rules and defaults are defined in
+[CTGPromptServer types](./types.md).

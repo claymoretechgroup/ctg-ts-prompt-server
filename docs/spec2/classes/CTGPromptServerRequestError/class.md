@@ -21,6 +21,42 @@ class CTGPromptServerRequestError extends CTGPromptServerError {
         message: string,
         data?: null | boolean | number | string | object
     ): CTGPromptServerRequestError;
+    static unauthorized(
+        message: string,
+        data?: null | boolean | number | string | object
+    ): CTGPromptServerRequestError;
+    static invalidContentType(
+        message: string,
+        data?: null | boolean | number | string | object
+    ): CTGPromptServerRequestError;
+    static invalidBody(
+        message: string,
+        data?: null | boolean | number | string | object
+    ): CTGPromptServerRequestError;
+    static invalidPrompt(
+        message: string,
+        data?: null | boolean | number | string | object
+    ): CTGPromptServerRequestError;
+    static invalidQuery(
+        message: string,
+        data?: null | boolean | number | string | object
+    ): CTGPromptServerRequestError;
+    static promptNotFound(
+        message: string,
+        data?: null | boolean | number | string | object
+    ): CTGPromptServerRequestError;
+    static cancelNotAllowed(
+        message: string,
+        data?: null | boolean | number | string | object
+    ): CTGPromptServerRequestError;
+    static notFound(
+        message: string,
+        data?: null | boolean | number | string | object
+    ): CTGPromptServerRequestError;
+    static methodNotAllowed(
+        message: string,
+        data?: null | boolean | number | string | object
+    ): CTGPromptServerRequestError;
 }
 ```
 
@@ -79,5 +115,106 @@ static init(
 ```
 
 Creates a `CTGPromptServerRequestError` with the same arguments as the
-constructor. It exists as a named factory for call sites that prefer
-factory construction over `new`.
+constructor. It exists as a low-level factory for cases where the caller
+must pass an explicit status. Route handlers should prefer the named
+request-error factories below so supported request error codes always
+receive the correct HTTP status.
+
+### STATIC :: CTGPromptServerRequestError.unauthorized
+
+```ts
+static unauthorized(
+    message: string,
+    data?: null | boolean | number | string | object
+): CTGPromptServerRequestError;
+```
+
+Creates `UNAUTHORIZED` / `6` with HTTP status `401`.
+
+### STATIC :: CTGPromptServerRequestError.invalidContentType
+
+```ts
+static invalidContentType(
+    message: string,
+    data?: null | boolean | number | string | object
+): CTGPromptServerRequestError;
+```
+
+Creates `INVALID_CONTENT_TYPE` / `7` with HTTP status `415`.
+
+### STATIC :: CTGPromptServerRequestError.invalidBody
+
+```ts
+static invalidBody(
+    message: string,
+    data?: null | boolean | number | string | object
+): CTGPromptServerRequestError;
+```
+
+Creates `INVALID_BODY` / `8` with HTTP status `400`.
+
+### STATIC :: CTGPromptServerRequestError.invalidPrompt
+
+```ts
+static invalidPrompt(
+    message: string,
+    data?: null | boolean | number | string | object
+): CTGPromptServerRequestError;
+```
+
+Creates `INVALID_PROMPT` / `9` with HTTP status `400`.
+
+### STATIC :: CTGPromptServerRequestError.invalidQuery
+
+```ts
+static invalidQuery(
+    message: string,
+    data?: null | boolean | number | string | object
+): CTGPromptServerRequestError;
+```
+
+Creates `INVALID_QUERY` / `10` with HTTP status `400`.
+
+### STATIC :: CTGPromptServerRequestError.promptNotFound
+
+```ts
+static promptNotFound(
+    message: string,
+    data?: null | boolean | number | string | object
+): CTGPromptServerRequestError;
+```
+
+Creates `PROMPT_NOT_FOUND` / `11` with HTTP status `404`.
+
+### STATIC :: CTGPromptServerRequestError.cancelNotAllowed
+
+```ts
+static cancelNotAllowed(
+    message: string,
+    data?: null | boolean | number | string | object
+): CTGPromptServerRequestError;
+```
+
+Creates `CANCEL_NOT_ALLOWED` / `12` with HTTP status `409`.
+
+### STATIC :: CTGPromptServerRequestError.notFound
+
+```ts
+static notFound(
+    message: string,
+    data?: null | boolean | number | string | object
+): CTGPromptServerRequestError;
+```
+
+Creates `NOT_FOUND` / `13` with HTTP status `404`.
+
+### STATIC :: CTGPromptServerRequestError.methodNotAllowed
+
+```ts
+static methodNotAllowed(
+    message: string,
+    data?: null | boolean | number | string | object
+): CTGPromptServerRequestError;
+```
+
+Creates `METHOD_NOT_ALLOWED` / `14` with HTTP status `405`.

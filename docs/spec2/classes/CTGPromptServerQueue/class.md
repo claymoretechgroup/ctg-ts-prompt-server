@@ -138,7 +138,10 @@ Validates and stores one pending queue record with `db.create(prompt)`,
 emits a live `pending` stream event message, queues `checkWork` when the
 queue is started, and returns the inserted `CTGPromptServerQueueRecord`. The
 prompt must be a non-empty string whose UTF-8 byte length is less than or
-equal to `_maxPromptBytes`.
+equal to `_maxPromptBytes`. Invalid prompt input throws
+`CTGPromptServerRequestError.invalidPrompt(...)`, which sends
+`INVALID_PROMPT` / `9` with HTTP status `400` when surfaced through a
+route.
 
 | Argument | Type | Description |
 |---|---|---|
@@ -219,9 +222,11 @@ claims beyond the configured concurrency limit.
 stop(): Promise<void>;
 ```
 
-Disables new claims and resolves after active runner results plus queued
-terminal tasks settle. A stopped queue may still accept submitted
-records, but it must not claim them until `start()` is called again.
+Disables new claims and resolves after the queue has stopped scheduling
+new work. It does not wait for active runner results to settle and does
+not turn active records into terminal records. A stopped queue may still
+accept submitted records, but it must not claim them until `start()` is
+called again.
 
 | Argument | Type | Description |
 |---|---|---|

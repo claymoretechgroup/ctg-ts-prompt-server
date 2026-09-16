@@ -24,7 +24,6 @@ interface CTGPromptServerQueueRecord {
     readonly response: string;
     readonly errorCode: number | null;
     readonly errorMessage: string | null;
-    readonly info: null | boolean | number | string | object;
     readonly runner: CTGPromptRunnerType | null;
     readonly createdAt: number;
     readonly startedAt: number | null;
@@ -40,7 +39,6 @@ interface CTGPromptServerQueueRecord {
 | `response` | `string` | yes | Accumulated or final response text. |
 | `errorCode` | `number \| null` | yes | Stored prompt failure application code, or `null` when there is no error. |
 | `errorMessage` | `string \| null` | yes | Stored prompt failure message, or `null` when there is no error. |
-| `info` | `null \| boolean \| number \| string \| object` | yes | Operator diagnostics parsed from the stored JSON value. |
 | `runner` | `CTGPromptRunnerType \| null` | yes | Optional runner type metadata for the record. |
 | `createdAt` | `number` | yes | Epoch milliseconds when the record was submitted. |
 | `startedAt` | `number \| null` | yes | Epoch milliseconds when the record was claimed. |

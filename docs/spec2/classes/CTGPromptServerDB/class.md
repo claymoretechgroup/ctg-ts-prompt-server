@@ -22,7 +22,6 @@ class CTGPromptServerDB {
         readonly response?: string;
         readonly errorCode?: number;
         readonly errorMessage?: string;
-        readonly info?: null | boolean | number | string | object;
     }): CTGPromptServerQueueRecord;
     cancel(id: number): CTGPromptServerQueueRecord;
     interruptActive(): number;
@@ -188,14 +187,13 @@ finish(id: number, outcome: {
     readonly response?: string;
     readonly errorCode?: number;
     readonly errorMessage?: string;
-    readonly info?: null | boolean | number | string | object;
 }): CTGPromptServerQueueRecord;
 ```
 
 Moves a record to terminal status code `3` or `-1`, writes response or
-error fields, serializes optional diagnostics to `info`, and sets
-`finishedAt = Date.now()`. Successful finishes clear error fields;
-failed finishes default `errorCode` to `2` when not supplied.
+error fields, and sets `finishedAt = Date.now()`. Successful finishes
+clear error fields; failed finishes default `errorCode` to `2` when not
+supplied.
 
 Valid finish status codes are `CTGPromptServerQueue.STATUS.DONE` and
 `CTGPromptServerQueue.STATUS.ERROR`. `CANCELLED` is terminal queue state, but
@@ -204,7 +202,7 @@ it is written by `cancel(...)`, not `finish(...)`.
 | Argument | Type | Description |
 |---|---|---|
 | `id` | `number` | Queue record ID to finish. |
-| `outcome` | object | Terminal status, response or error values, and optional diagnostics. |
+| `outcome` | object | Terminal status, response or error values. |
 
 _Examples_
 

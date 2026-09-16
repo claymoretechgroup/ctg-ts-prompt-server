@@ -16,6 +16,7 @@ Exact contracts live in the focused spec files:
 | Database schema | [spec2.db.md](./spec2.db.md) |
 | Class index | [spec2.classes.md](./spec2.classes.md) |
 | Type ownership | [spec2.types.md](./spec2.types.md) |
+| Cross-class conformance | [spec2.conformance.md](./spec2.conformance.md) |
 | `CTGPromptServerDB` | [class](./classes/CTGPromptServerDB/class.md), [types](./classes/CTGPromptServerDB/types.md) |
 | `CTGPromptServerQueue` | [class](./classes/CTGPromptServerQueue/class.md), [types](./classes/CTGPromptServerQueue/types.md) |
 | `CTGPromptServer` | [class](./classes/CTGPromptServer/class.md), [types](./classes/CTGPromptServer/types.md) |
@@ -26,7 +27,7 @@ Exact contracts live in the focused spec files:
 
 ## Architecture
 
-The service has four primary boundaries:
+The service has five primary boundaries:
 
 | Boundary | Responsibility |
 |---|---|
@@ -190,14 +191,16 @@ current state.
 
 `server.close()` stops accepting HTTP work, closes open SSE streams,
 stops queue processing, and closes the database. Queue shutdown disables
-new claims and waits for active runner results plus queued terminal tasks
-to settle according to the class contract.
+new claims and does not wait for active runner results to settle. Active
+child processes may continue or be terminated by their runner/process
+environment; rows left `ACTIVE` are marked interrupted by the next
+`server.start(...)` recovery pass.
 
 ---
 
 ## Error Model
 
-Spec2 separates four error domains:
+Spec2 separates five error domains:
 
 1. Request errors reject an HTTP request.
 2. Database errors originate from durable storage operations.
@@ -244,6 +247,22 @@ Runner configuration describes one configured runner for the server. The
 service does not expose per-request runner choice, a runner registry, or
 prompt templating.
 
+Operational limits are fixed or configured as follows:
+
+| Limit | Value |
+|---|---|
+| JSON request body limit | Fixed `1 MiB` / `1,048,576` bytes. |
+| Prompt text limit | `maxPromptBytes`, default `131071`, configurable only within `1..131071`. |
+| Runner timeout | `runner.timeout`, default `600000` milliseconds. |
+| Runner max buffer | `runner.maxBuffer` when supplied; otherwise the selected runner's own default. |
+| SSE keep-alive cadence | `keepAliveMs`, default `15000` milliseconds, minimum `1000`. |
+| Long-poll wait ceiling | `maxWaitMs`, default `30000` milliseconds. Route `wait` values above this are clamped. |
+| Pagination default page size | `defaultLimit`, default `50`. |
+| Pagination maximum page size | `maxLimit`, default `200`. |
+
+Configuration validation and defaults are specified in
+[CTGPromptServer types](./classes/CTGPromptServer/types.md).
+
 Maintenance operations are script-level operations over the SQLite
 database:
 
@@ -269,11 +288,13 @@ Spec2 intentionally does not define:
 5. Health routes.
 6. Durable per-event stream history.
 7. Multiple active service workers sharing one queue database.
+8. Graceful drain shutdown that waits for active runners to finish.
 
 ---
 
 ## Conformance
 
-Conformance requirements should live in a dedicated
-`spec2.conformance.md` document. Class documents define behavior and
-surface area; conformance documents define how that behavior is proven.
+Class documents define behavior and surface area. Tests should be
+derived directly from those class specs. Cross-class workflow
+conformance lives in [spec2.conformance.md](./spec2.conformance.md) for
+architecture-level behavior that spans multiple classes.

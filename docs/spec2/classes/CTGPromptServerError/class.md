@@ -103,8 +103,9 @@ not already `CTGPromptServerError` instances.
 
 When `data` is omitted, the constructor stores `null`. Spec2 keeps the
 type intentionally broad for now: strings, numbers, booleans, objects,
-arrays, and `null` are valid. Implementations should still only include
-values that can be safely serialized in the JSON response body.
+arrays, and `null` are valid. `data` is retained only on the in-process
+error instance for inspection or logging and is never serialized by
+`toResponse()`.
 
 ---
 

@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS prompts (
         error_code IS NULL OR error_code IN (2, 3, 4, 5, 15)
     ),
     error_message TEXT,
-    info          TEXT,
     runner        TEXT,
     created_at    INTEGER NOT NULL,
     started_at    INTEGER,
@@ -51,7 +50,6 @@ Column meanings:
 | `response` | Accumulated response text while running, overwritten by the final runner result on success. |
 | `error_code` | Prompt failure application code when `status_code = -1`; otherwise `NULL`. Valid stored prompt failure codes are `2`, `3`, `4`, `5`, and `15`. |
 | `error_message` | Prompt failure message when `status_code = -1`; otherwise `NULL`. |
-| `info` | JSON diagnostics for operators. It is not serialized on HTTP prompt responses. |
 | `runner` | Runner type metadata. It may remain `NULL` for the initial single-runner service. |
 | `created_at` | Epoch milliseconds when the record was submitted. |
 | `started_at` | Epoch milliseconds when the record was claimed. `NULL` until active. |
