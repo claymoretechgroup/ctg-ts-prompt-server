@@ -4,67 +4,93 @@ Current branch context:
 
 - Base branch for spec work: `spec-v2`
 - TODO branch: `todo-spec2-next-steps`
-- Latest pushed spec branch commit at time of TODO creation:
-  `82cbaa0 docs: document v2 prompt queue class`
+- Latest local spec branch checkpoint:
+  `70d1ffd Implement spec-v2 server route structure`
 
-## Next Spec Work
+## Current Spec-V2 Checkpoint
 
-1. Continue `docs/spec2.classes.md` with `CTGPromptServer`.
-2. Continue `docs/spec2.classes.md` with `CTGPromptServerError`.
-3. Create `docs/spec2.conformance.md` as the single conformance criteria document.
-4. Organize conformance by class where useful, plus cross-class workflows where behavior spans boundaries.
-5. Keep conformance criteria out of `docs/spec2.classes.md`; class docs should define shape and behavior, not test requirements.
-6. Decide whether the combined `docs/spec2.md` should be regenerated from:
-   - `docs/spec2.db.md`
-   - `docs/spec2.types.md`
-   - `docs/spec2.classes.md`
-   - `docs/spec2.conformance.md`
-7. If `docs/spec2.md` remains checked in, add a short note that it is the assembled implementation spec.
+Completed on `spec-v2`:
 
-## Open Design Checks
+1. Split class specs into `docs/spec2/classes/<ClassName>/class.md` and `types.md`.
+2. Refactored `docs/spec2/spec2.md` into a general architecture document that references class, type, schema, and conformance docs.
+3. Added `docs/spec2/spec2.conformance.md` for cross-class architecture and workflow criteria.
+4. Renamed implementation classes to `CTGPromptServerDB` and `CTGPromptServerQueue`.
+5. Refactored error classes around integer `CODE` registries, derived labels, `toResponse()`, and `sendResponse(...)`.
+6. Removed `info` from the prompt schema/spec.
+7. Extracted `CTGPromptServer` routes into `src/CTGPromptServer/routes/*`.
+8. Switched SSE route to `GET /sse/:id`.
+9. Moved SSE sinks and long-poll waiters into `CTGPromptServer`.
+10. Removed `CTGPromptSubscribers`.
+11. Added static-only `CTGPromptServerValidation` and spec docs for server validation helpers.
+12. Moved tests out of `tests/spec2` / `tests/conformance`; `npm test` now runs the root spec test suite.
+13. Verified the checkpoint with:
+    - `npm run check`
+    - `npm test`
+    - `npm run compile:package`
 
-1. Confirm whether `CTGPromptDB.constructor` should be public, protected, or private.
-2. Confirm whether `CTGPromptQueue.start()` should call `recover()` or whether `CTGPromptServer.start()` remains responsible for startup recovery.
-3. Confirm whether `CTGPromptQueue.activeRunner(...)` should stay public static for testability.
-4. Confirm whether `CTGPromptQueue` needs any private methods documented beyond the public/static surface.
-5. Confirm whether `runner` should remain nullable metadata in the initial schema or be written on every claim.
+## Next Implementation Work
 
-## Operational Docs
+1. Reconcile `CTGPromptServerQueue` implementation with its spec.
+   - The spec describes the `CTGAgentProc` workflow with `checkWork`, `runPrompt`, `finishPrompt`, and `failPrompt`.
+   - The current implementation still uses a direct `dispatch()` / `drain()` execution shape.
+   - Decide whether to implement the spec as written or revise the spec before changing code.
+2. Implement or remove spec drift around queue lifecycle methods.
+   - Spec surface: `next()`, `start()`, `stop()`, `activeRunner(...)`.
+   - Current surface includes direct read/list/dispatch/drain behavior that may belong on `CTGPromptServer` or route helpers instead.
+3. Add tests that enforce server-owned live delivery.
+   - Long-poll waiters wake when prompts finish.
+   - `server.close()` wakes waiters and closes SSE sinks.
+   - SSE sinks close after `done`, `error`, and `cancelled`.
+   - Write failures drop only the failing SSE sink.
+4. Add tests for the extracted route modules.
+   - Ensure `CTGPromptServer` imports only the aggregate route binder.
+   - Ensure route groups bind the documented paths.
+   - Ensure fallback behavior remains last in binding order.
+5. Add tests for `CTGPromptServerValidation`.
+   - Static-only construction.
+   - Literal support for runner kind and stream mode.
+   - Integer, boolean, string, string-array, and env-object validation.
+6. Review `CTGPromptServer` close behavior against spec.
+   - Stop listener.
+   - Close all SSE sinks.
+   - Wake all long-poll waiters.
+   - Stop queue.
+   - Close DB.
+7. Review `openSSE(...)` terminal-record behavior.
+   - If a sink is opened for an already-terminal record, make sure it is not left registered after ending.
+8. Review package exports.
+   - Confirm which class-local `types.ts` files should remain internal.
+   - Export only the public surface required by the spec.
 
-1. Decide whether to create `docs/spec2.operations.md` or fold operational assumptions into the assembled `docs/spec2.md`.
-2. Document that one server process owns one DB file; WAL allows concurrent readers but not multiple active service workers on the same database.
-3. Document deployment assumptions: host process, Docker bridge access, Bearer auth as the protection boundary, and `runner.env` as a full child-environment replacement.
-4. Document maintenance scripts for purge finished, purge all, and reset schema, including whether they run SQL directly or call a helper.
-5. Document startup and shutdown order: recovery before new claims, queue start/stop behavior, active runner handling, SSE close behavior, and DB close behavior.
-6. Document operational limits: fixed JSON body limit, `maxPromptBytes`, runner timeout/default `maxBuffer`, SSE keep-alive cadence, and long-poll wait clamping.
-7. Confirm the observability stance: keep the original "no operational logging" decision or define explicit logging behavior.
-8. Document the source-of-truth process for split docs versus assembled `docs/spec2.md`.
+## Spec Follow-Ups
 
-## Original Spec Parity
+1. Confirm whether `CTGPromptServerQueue` should extend `CTGAgentProc` or own a `CTGAgentProc` instance.
+2. Confirm whether `CTGPromptServerQueue` should expose `read(...)` and `list(...)`, or whether reads should be DB/server concerns.
+3. Confirm the final queue start/stop vocabulary before implementing queue lifecycle tests.
+4. Confirm whether the older `docs/spec.md` should remain maintained or be treated as historical once spec2 is authoritative.
+5. Review all spec2 docs for class names after the latest rename:
+   - `CTGPromptServerDB`
+   - `CTGPromptServerQueue`
+   - `CTGPromptServer`
+   - `CTGPromptServerError`
+   - `CTGPromptServerRequestError`
+   - `CTGPromptServerValidation`
+6. Review `docs/spec2.conformance.md` after queue implementation catches up with the class docs.
 
-1. Compare the split v2 docs against `docs/spec.md` before implementation starts.
-2. Carry forward server configuration details that still apply: host, port, auth token, Docker bridge defaults, runner config, and queue limits.
-3. Carry forward HTTP API behavior that still applies: prompt creation, prompt lookup, prompt cancellation, pagination, streaming, long polling, health, and method/content-type errors.
-4. Carry forward response envelope behavior and decide which envelopes belong to `CTGPromptServer` versus `CTGPromptServerError`.
-5. Carry forward shutdown behavior around signals, server close, queue stop, active runners, and database close.
-6. Explicitly mark any original v1 feature that is intentionally omitted from v2 initial scope.
+## Recommended Next Session Order
 
-## Implementation Order
-
-1. Update exported types in `src/types.ts`.
-2. Update `CTGPromptServerError` label/code behavior.
-3. Replace `CTGPromptDB` schema and method API.
-4. Refactor `CTGPromptQueue` around `CTGAgentProc` and `ActiveRunner`.
-5. Move live SSE sinks and long-poll waiters into `CTGPromptServer`.
-6. Remove `CTGPromptSubscribers` after the server owns live delivery.
-7. Write `docs/spec2.conformance.md`.
-8. Update conformance tests around DB transitions, queue lifecycle, SSE, long polling, and error envelopes.
+1. Read `docs/spec2/classes/CTGPromptServerQueue/class.md`.
+2. Compare the queue spec directly against `src/CTGPromptServerQueue/CTGPromptServerQueue.ts`.
+3. Decide whether to implement the `CTGAgentProc` queue model exactly as specified.
+4. Update tests first for the queue contract.
+5. Refactor `CTGPromptServerQueue` to pass the queue tests.
+6. Add live-delivery tests around `CTGPromptServer`.
+7. Run `npm run check`, `npm test`, and `npm run compile:package`.
 
 ## Notes
 
-- `ActiveRunnerConfig` now carries an already-created runner result promise.
-- `runPrompt` starts `runner.run(record.prompt, ...)`; `activeRunner(...)` only constructs the `ActiveRunner` value.
-- `interruptActive()` is server-startup recovery and marks previously active records as interrupted terminal outcomes before new work is claimed.
-- Initial spec2 intentionally does not persist stream-event history; reconnect reads the current prompt queue record.
-- Public/exported support types use the `CTG` prefix; local helper types can remain unprefixed.
-- Database fields store numeric codes for prompt status and terminal errors; labels are resolved in TypeScript.
+- Spec-first remains the rule: implementation changes should trace to `docs/spec2`.
+- `TODO.md` is maintained on `todo-spec2-next-steps`, not intended as a long-term versioned artifact on `spec-v2`.
+- Initial spec2 intentionally does not persist stream-event history; reconnect reads current prompt state with `GET /prompt/:id`.
+- Request errors use `CTGPromptServerRequestError`; base server errors default to HTTP 500 when sent through `sendResponse(...)`.
+- Queue status and server error codes both use integer registries with labels derived from the registry.
