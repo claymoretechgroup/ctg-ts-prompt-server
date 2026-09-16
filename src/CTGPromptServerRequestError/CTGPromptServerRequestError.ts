@@ -1,15 +1,9 @@
 // Dependencies:
 import CTGPromptServerError from "../CTGPromptServerError/CTGPromptServerError.js"; // Base normalized server error
 
-/**
- *
- * Type Declarations
- *
- */
-
-// TYPE :: null|BOOLEAN|NUMBER|STRING|OBJECT
-// Broad in-process error details retained for logging/inspection only.
-type CTGPromptServerErrorData = null | boolean | number | string | object;
+// Type dependencies:
+import type { CTGPromptServerErrorData } from "../CTGPromptServerError/types.js"; // In-process error details
+import type { CTGPromptServerRequestErrorInitArgs } from "./types.js"; // Static factory argument forms
 
 /**
  *
@@ -21,7 +15,7 @@ type CTGPromptServerErrorData = null | boolean | number | string | object;
 export default class CTGPromptServerRequestError extends CTGPromptServerError {
 
     /* Instance Fields */
-    override readonly status: number;                             // HTTP response status
+    readonly status: number;                                      // HTTP response status
 
     // CONSTRUCTOR :: NUMBER, NUMBER, STRING, UNKNOWN? -> this
     // Creates a request error with explicit application code and HTTP status.
@@ -39,7 +33,7 @@ export default class CTGPromptServerRequestError extends CTGPromptServerError {
 
     // Static Factory Method :: NUMBER, NUMBER, STRING, UNKNOWN? -> ctgPromptServerRequestError
     // Creates a request error with an explicit status.
-    static override init(...args: [number, string, CTGPromptServerErrorData?] | [number, number, string, CTGPromptServerErrorData?]): CTGPromptServerRequestError {
+    static override init(...args: CTGPromptServerRequestErrorInitArgs): CTGPromptServerRequestError {
         if (typeof args[1] === "string") {
             return new this(args[0], 500, args[1], args[2]);
         }

@@ -48,7 +48,7 @@ alongside a stream; it is the stream, and Server-Sent Events is one
 projection of it. Four consequences, and they are the point of the
 design:
 
-| A subscriber arrives… | receives |
+| A live client arrives… | receives |
 |---|---|
 | before the prompt runs | nothing yet, then the whole run live, then the stream closes |
 | mid-run | the history so far, then the live tail, then the stream closes |
@@ -78,10 +78,10 @@ set of them (R4).
 
 Lifecycle transitions are themselves rows in the events table. The
 stream therefore carries runner output and prompt state changes in **one
-sequence**, so a subscriber never has to reconcile two orderings.
+sequence**, so a live client never has to reconcile two orderings.
 
 **Domain vocabulary used throughout, and nothing beyond it:** prompt,
-event, sequence, dispatcher, runner, subscriber, response, outcome,
+event, sequence, dispatcher, runner, live response, outcome,
 finished.
 
 ### 1.1 Where this runs, and why that shapes it
@@ -120,15 +120,14 @@ Three consequences run through the rest of this document:
 |---|---|---|
 | Durable prompts, events, sequence allocation, response accumulation, purge | `CTGPromptDB` | the `node:sqlite` database |
 | Dispatch, concurrency limit, invoking the runner, recording events, long-poll waits | `CTGPromptQueue` | the `LLMRunner` instance |
-| Bridging committed events to open responses | `CTGPromptSubscribers` | open SSE sinks and long-poll waiters |
-| Config validation, runner construction, HTTP routes, envelopes, lifecycle | `CTGPromptServer` | the Express application |
+| Config validation, runner construction, HTTP routes, envelopes, live delivery, lifecycle | `CTGPromptServer` | the Express application, open SSE sinks, and long-poll waiters |
 | Typed errors | `CTGPromptServerError` | — |
 
-Four classes plus the error class. Dependency direction is one way:
-`CTGPromptServer` → `CTGPromptQueue` → (`CTGPromptDB`,
-`CTGPromptSubscribers`). `CTGPromptDB` knows nothing about subscribers,
-HTTP, or the runner; it is a database. `CTGPromptQueue` knows nothing
-about HTTP. This is the decomposition D-nothing forced, so it is
+Three runtime classes plus the error class. Dependency direction is one
+way: `CTGPromptServer` → `CTGPromptQueue` → `CTGPromptDB`.
+`CTGPromptDB` knows nothing about live clients, HTTP, or the runner; it
+is a database. `CTGPromptQueue` knows nothing about HTTP response
+sinks. This is the decomposition D-nothing forced, so it is
 Judgment Call 1.
 
 `CTGPromptServer` is both the entry point and the HTTP surface: it
@@ -191,16 +190,6 @@ class CTGPromptDB {
 
     purgeFinished(): number;
     close(): void;
-}
-
-class CTGPromptSubscribers {
-    static init(): CTGPromptSubscribers;
-
-    add(id: number, sink: CTGPromptEventSink): CTGPromptSubscription;
-    publish(id: number, event: EventRecord): void;
-    closePrompt(id: number): void;
-    closeAll(): void;
-    count(id: number): number;
 }
 
 class CTGPromptServerError extends Error {
@@ -294,14 +283,14 @@ interface CTGPromptEventSink {
     end(): void;                         // close the response
 }
 
-interface CTGPromptSubscription {
-    close(): void;                       // deregister this subscriber; idempotent
+interface CTGPromptLiveResponseHandle {
+    close(): void;                       // deregister this live response; idempotent
 }
 ```
 
 `CTGPromptEventSink` is structural. `node:http`'s `ServerResponse`
 satisfies it, so does the long-poll waiter of §5.5, and so does a test
-double — no test needs a socket to exercise `CTGPromptSubscribers`.
+double — no test needs a socket to exercise live-delivery behavior.
 
 ### 3.2 Configuration
 
@@ -334,7 +323,8 @@ interface CTGPromptServerConfig {
 
 interface CTGPromptQueueConfig {
     db: CTGPromptDB;               // durable prompt and event storage
-    subscribers: CTGPromptSubscribers;  // live delivery for committed events
+    publishEvent(id: number, event: EventRecord): void; // live delivery for committed events
+    closePrompt(id: number): void;  // close live responses for a terminal prompt
     runner: LLMRunner;             // the constructed runner instance
     runnerKind: RunnerKind;        // the kind recorded on records and "active" events (R25)
     concurrency: number;           // resolved, validated
@@ -402,12 +392,12 @@ active by a dead process, begins dispatching, and binds the port.
 
 | Operation | Signature | Description | Mutates |
 |---|---|---|---|
-| `init` | `ctgPromptServerConfig -> ctgPromptServer` | Validate config, open the database, create the schema if absent and `initDB` is true, build subscribers and the Express app | Creates the database file, tables, and indexes if absent and `initDB` is true |
+| `init` | `ctgPromptServerConfig -> ctgPromptServer` | Validate config, open the database, create the schema if absent and `initDB` is true, build live-delivery registries and the Express app | Creates the database file, tables, and indexes if absent and `initDB` is true |
 | `app` | `GETTER :: VOID -> express` | The configured Express application | |
 | `db` | `GETTER :: VOID -> ctgPromptDB` | The database, exposed for tests | |
 | `queue` | `GETTER :: VOID -> ctgPromptQueue` | The dispatcher; throws `INTERNAL_ERROR` before `start` (§4.2) | |
 | `start` | `NUMBER:port -> PROMISE({host, port})` | Construct the runner, recover, dispatch, bind the socket on `port` and the configured `host` (§4.2) | Database: active rows moved to `error`; spawns child processes; binds a socket |
-| `close` | `VOID -> PROMISE(VOID)` | Stop listening, end every open sink, close the database (§4.4) | Closes socket, subscribers, database |
+| `close` | `VOID -> PROMISE(VOID)` | Stop listening, end every open sink, close the database (§4.4) | Closes socket, live responses, database |
 
 `CTGPromptServer` exposes no purge operation. Purging is
 `CTGPromptDB.purgeFinished` and the script reaches it directly (§6.6,
@@ -453,7 +443,7 @@ Performs these steps in order. Any failure throws
     `init` constructs the instance with `new this(...)`, so a subclass
     calling `init` receives an instance of the subclass — which is how
     a `createRunner` override (§4.2) takes effect.
-12. Build `CTGPromptSubscribers`.
+12. Build live-delivery registries for SSE responses and long-poll waiters.
 13. Build the Express application: the auth middleware, the routes of
     §8.1, and the error handler of §8.4.
 
@@ -587,7 +577,7 @@ final event like any other failure.
 `close :: VOID -> PROMISE(VOID)`
 
 1. Stop the listener accepting new connections.
-2. `subscribers.closeAll()` — every open SSE response and every waiting
+2. Close every open SSE response and every waiting
    long-poll response is ended. This must happen **before** waiting on
    the listener: an HTTP server's close completes only when every
    connection has ended, and an open SSE response is a live connection
@@ -630,13 +620,13 @@ the only component that writes events during a run.
 
 | Operation | Signature | Description | Mutates |
 |---|---|---|---|
-| `init` | `ctgPromptQueueConfig -> ctgPromptQueue` | Wire database, subscribers, runner | |
+| `init` | `ctgPromptQueueConfig -> ctgPromptQueue` | Wire database, live-delivery callbacks, runner | |
 | `submit` | `STRING:prompt -> promptRecord` | Validate the text, insert a pending prompt, append `pending`, dispatch (§5.1) | Database: one prompt row, one event row; may start a run |
 | `cancel` | `NUMBER:id -> promptRecord` | Cancel a **pending** prompt (§5.2) | Database: prompt row status, one event row |
 | `read` | `NUMBER:id -> promptRecord` | Read one prompt | |
 | `readWait` | `NUMBER:id, NUMBER:waitMs -> PROMISE(promptRecord)` | Long poll: resolve when finished or when `waitMs` elapses (§5.5) | Registers and deregisters one waiter |
 | `list` | `promptListQuery -> promptListPage` | Page of prompts, newest first | |
-| `subscribe` | `NUMBER:id, ctgPromptEventSink, NUMBER:afterSequence -> ctgPromptSubscription` | Replay history then attach live (§7.3) | Registers a subscriber |
+| `openLiveResponse` | `NUMBER:id, ctgPromptEventSink, NUMBER:afterSequence -> ctgPromptLiveResponseHandle` | Replay history then attach live (§7.3) | Registers a live response |
 | `recover` | `VOID -> NUMBER` | Move every active prompt to `error` as `INTERRUPTED` (§4.3) | Database: prompt rows, event rows |
 | `dispatch` | `VOID -> VOID` | Start runs until the concurrency limit is reached (§5.3) | Database: claimed prompts; spawns child processes |
 | `drain` | `VOID -> PROMISE(VOID)` | Resolve when no run is in flight | |
@@ -659,7 +649,7 @@ the only component that writes events during a run.
 4. `db.insertPrompt(prompt)` — inserts the row with
    `status = 'pending'`, lets SQLite assign the id, and appends a
    `pending` event, in one transaction.
-5. `subscribers.publish(id, event)`.
+5. Publish the event through server-owned live delivery.
 6. `dispatch()`.
 7. Return the record.
 
@@ -708,13 +698,14 @@ Detection order, and it matters:
    one transaction. If the update affected zero rows, the prompt changed
    state between step 1 and step 4; throw `CANCEL_NOT_ALLOWED` with the
    re-read status.
-5. `subscribers.publish(id, event)`, then `subscribers.closePrompt(id)`
+5. Publish the event through server-owned live delivery, then close
+   live responses for `id`
    — `cancelled` is finished, so every open stream and every waiter for
    this prompt ends.
 6. Return the record.
 
-**Mutation:** one prompt row updated, one event row written, every
-subscriber for this id closed.
+**Mutation:** one prompt row updated, one event row written, every live
+response for this id closed.
 
 Step 4's conditional update is not defensive noise: it is what makes
 cancel and `claimNextPending` mutually exclusive without a lock. A
@@ -738,7 +729,7 @@ flight, keyed by the integer id (R18).
    no pending prompt exists — return.
 4. Add `claimed.prompt.id` to `_active`. **This happens synchronously,
    before any `await` or promise creation.**
-5. `subscribers.publish(id, claimed.event)` — the `active` lifecycle
+5. Publish `claimed.event` through server-owned live delivery — the `active` lifecycle
    event.
 6. Call `this._execute(claimed.prompt)`. `_execute` is `async`, so
    calling it returns a promise; **the promise is not awaited here.**
@@ -804,7 +795,8 @@ Three properties, each following from a specific step:
    a. `db.finishPrompt(id, { status: "done", response: result, info: { stderr: error } })`
       — writes `response`, `finished_at`, `status`, and `info`, and
       appends a `done` event, in one transaction.
-   b. `subscribers.publish`, then `subscribers.closePrompt(id)`.
+   b. Publish the terminal event through server-owned live delivery,
+      then close live responses for `id`.
 5. **On rejection or throw** with `cause`, the outcome error type is
    always `RUNNER` (§9.2):
    a. If `LLMRunnerError.is(cause)`, then `errorMessage = cause.msg` and
@@ -815,7 +807,8 @@ Three properties, each following from a specific step:
       `Error` and `String(cause)` when it is not, and `info` is
       `{ thrown: <the constructor name or typeof> }`.
    c. `db.finishPrompt(id, { status: "error", errorType: "RUNNER", errorMessage, info })`.
-   d. `subscribers.publish`, then `subscribers.closePrompt(id)`.
+   d. Publish the terminal event through server-owned live delivery,
+      then close live responses for `id`.
 6. **If the server's own code fails** while the prompt is active — the
    concrete case is `CTGPromptDB` throwing while appending an event or
    writing the outcome — the outcome error type is `SERVER`:
@@ -826,7 +819,7 @@ Three properties, each following from a specific step:
    `INTERRUPTED`.
 
 **Mutation:** one prompt row moved to a finished state, one event row
-written, every subscriber for this id closed.
+written, every live response for this id closed.
 
 **The runner's stderr is not an error.** `LLMRunnerResult` has exactly
 the keys `result` and `error`, being stdout and stderr
@@ -904,19 +897,19 @@ conformance suite asserts the two agree for every scripted run (§11).
    patience than the server offers gets what the server offers.
 2. `db.readPrompt(id)`. If undefined, throw `PROMPT_NOT_FOUND`.
 3. If the status is finished, return the record now.
-4. Register a waiter: `subscribers.add(id, sink)` where `sink.write` is
-   a no-op and `sink.end()` resolves the wait. **This is the same
-   subscriber mechanism the SSE route uses** — the finish path already
-   calls `closePrompt(id)`, which ends every sink for the prompt, so a
-   waiter needs no separate notification channel.
-5. Re-read the record. If it is now finished, close the subscription and
+4. Register a waiter with the server-owned live-response registry where
+   `sink.write` is a no-op and `sink.end()` resolves the wait. **This is
+   the same live-response mechanism the SSE route uses** — the finish
+   path already calls `closePrompt(id)`, which ends every sink for the
+   prompt, so a waiter needs no separate notification channel.
+5. Re-read the record. If it is now finished, close the live-response handle and
    return it — this closes the window between steps 2 and 4.
 6. Start a timer for `waitMs` that resolves the wait.
 7. Await the wait. In a `finally`, clear the timer and close the
-   subscription.
+   live-response handle.
 8. Re-read the record and return it, **finished or not**.
 
-**Mutation:** registers and then deregisters one subscriber. No row is
+**Mutation:** registers and then deregisters one live response. No row is
 written.
 
 Steps 4 and 5 are one synchronous block; `node:sqlite` is synchronous
@@ -946,7 +939,7 @@ still active and the client may poll again.
 
 A synchronous database over `node:sqlite`. It knows about prompts,
 events, sequence allocation, and response accumulation. It does not know
-about HTTP, subscribers, or the runner.
+about HTTP, live clients, or the runner.
 
 **`node:sqlite` is experimental in Node 22 and emits an
 `ExperimentalWarning` on import.** This is accepted (D3). No flag is
@@ -1027,7 +1020,7 @@ Column notes, because each one is load-bearing:
 
 **Pragmas applied at open, in this order:**
 
-1. `PRAGMA journal_mode = WAL;` — a subscriber replaying history reads
+1. `PRAGMA journal_mode = WAL;` — a live client replaying history reads
    while the dispatcher writes.
 2. `PRAGMA foreign_keys = ON;` — required, not decorative: the
    `events.prompt_id` foreign key is only enforced when it is on, and
@@ -1227,8 +1220,8 @@ this server being edited.
 
 Then, in this order: compute the response contribution from §5.5, call
 `db.appendEvent(promptId, name, payload, contribution)`, then
-`subscribers.publish(promptId, event)`. **Store first, publish second,
-always.** A subscriber must never see an event that is not yet
+publish the event through server-owned live delivery. **Store first,
+publish second, always.** A live client must never see an event that is not yet
 replayable, or a reconnect would lose it.
 
 If `appendEvent` throws, the exception is caught and the run continues;
@@ -1274,7 +1267,7 @@ data: <JSON payload on one line>
 `JSON.stringify`'d, which escapes newlines, so no multi-line `data:`
 continuation is ever needed.
 
-**Subscribe procedure**, in order, because the ordering is the whole
+**Live response procedure**, in order, because the ordering is the whole
 correctness argument:
 
 1. Resolve `afterSequence`: the `Last-Event-ID` request header parsed as
@@ -1285,25 +1278,26 @@ correctness argument:
    prompt that does not exist, and an empty event stream would look like
    a prompt that has not started.
 3. Write the SSE headers and flush them.
-4. `subscribers.add(id, sink)` — register **before** reading history.
+4. Register `sink` in the server-owned live-response registry — register
+   **before** reading history.
 5. `db.readEvents(id, afterSequence)` and write each one.
 6. If the last written event was a finished event, `end()` the response
-   and `close()` the subscription; done.
+   and `close()` the live-response handle; done.
 7. Otherwise start the keep-alive timer and leave the response open. The
-   subscription writes each subsequently published event, and ends the
+   live-response handle writes each subsequently published event, and ends the
    response after writing a finished one.
 
-**Mutation:** registers a subscriber and, on close, deregisters it. No
+**Mutation:** registers a live response and, on close, deregisters it. No
 row is written.
 
 Steps 4 and 5 are **one synchronous block with no `await` between
 them**. `node:sqlite` is synchronous and events are only appended from
 the dispatcher's async continuations, so no event can be committed
 between registration and replay. This is why no in-memory buffering step
-is needed. As a second guard, each subscription records the highest
+is needed. As a second guard, each live-response handle records the highest
 sequence it has written and drops any published event whose sequence is
 not greater — so a live event that was also in the replay is written
-once, not twice. Replay in step 5 writes **through the subscription**,
+once, not twice. Replay in step 5 writes **through the live-response handle**,
 not directly to the sink, so the high-water mark covers replayed events
 as well as live ones. Every event, replayed or live, is exactly one
 `sink.write` call carrying the complete frame of §7.3 — three lines and
@@ -1325,7 +1319,7 @@ continues to the remaining sinks (Judgment Call 16).
 | `Last-Event-ID` ≥ last sequence, prompt not finished | Headers, no events, stream stays open for the live tail |
 | `Last-Event-ID` malformed | Treated as `0` — full history |
 | Prompt already finished | Full history, then `end()` — the connection does not linger |
-| Client disconnects | The response's `close` event fires `subscription.close()`, deregistering the sink and clearing the keep-alive timer |
+| Client disconnects | The response's `close` event closes the live-response handle, deregistering the sink and clearing the keep-alive timer |
 
 **Keep-alive:** while a stream is open, a comment line `: keep-alive`
 followed by a blank line is written every `keepAliveMs` (default
@@ -1342,8 +1336,8 @@ ends for any reason.
 > consideration here; a `fetch` stream reader stops on the finished
 > event.
 
-> **Judgment Call 16 — subscribers are held per prompt id, keyed in a
-> `Map<number, Set<subscription>>`.** Multiple subscribers per prompt are
+> **Judgment Call 16 — live responses are held per prompt id, keyed in a
+> `Map<number, Set<liveResponseHandle>>`.** Multiple live responses per prompt are
 > supported and needed (an operator watching a prompt a client is
 > already streaming, or a long-poll waiter alongside a stream).
 > Publishing is a fan-out over the set; a sink that throws on `write` is
@@ -1552,7 +1546,7 @@ An unmatched path is `404` `NOT_FOUND`; an unmatched method on a matched
 path is `405` `METHOD_NOT_ALLOWED`.
 
 Errors on an **already-open SSE stream** cannot be responses — headers
-are sent. The stream is ended, the subscription is closed, and nothing
+are sent. The stream is ended, the live-response handle is closed, and nothing
 further is written. The client reconnects with `Last-Event-ID` and loses
 nothing, because the durable events table is the stream.
 
@@ -1697,7 +1691,7 @@ tests/
         queue.ts                   submit validation, dispatch limit, FIFO, no double dispatch
         events.ts                  runner event to row mapping, detection order, payloads
         response.ts                response accumulation per stream mode, runner result overwrite, accumulated-equals-final
-        subscribers.ts             fan-out, dedupe by sequence, close on finish, sink errors
+        liveDelivery.ts            fan-out, dedupe by sequence, close on finish, sink errors
         recovery.ts                active prompts interrupted; pending prompts untouched
         purge.ts                   finished rows deleted, cascade removes events, pending and active preserved
         routes.ts                  every route, envelope shape, Bearer auth, error statuses
@@ -1816,8 +1810,8 @@ Each entry states the **final** decision. Entries reversed in review say
 so and give the reason.
 
 1. **Four capability-shaped classes, not one service class** (§2).
-   Database, queue, subscribers, server. The database knows nothing
-   about HTTP, subscribers, or the runner; the queue knows nothing about
+   Database, queue, server. The database knows nothing
+   about HTTP, live clients, or the runner; the queue knows nothing about
    HTTP. This is what makes the database and the dispatch procedure
    testable without a socket. The routes live on the server because they
    are the thinnest layer in the system (R3).
@@ -1882,7 +1876,7 @@ so and give the reason.
 15. **The SSE stream closes after the finished event** (§7.3). Clients
     are server-side (R10), so there is no `EventSource` reconnect loop
     to worry about.
-16. **Subscribers are per-prompt sets; a throwing sink is dropped, not
+16. **Live responses are per-prompt sets; a throwing sink is dropped, not
     propagated** (§7.3). Long-poll waiters are registered through the
     same mechanism.
 17. **Express, deliberately overriding `ctg-ts-web-server` SQ-1** (§8).
@@ -1898,7 +1892,7 @@ so and give the reason.
     mapping exists in exactly one table and a `null` status is what
     marks a type as not being a request error.
 20. **Long polling on `GET /prompt/:id?wait=`, implemented with the
-    subscriber mechanism** (§5.5). The first consumer is a PHP system
+    live-response mechanism** (§5.5). The first consumer is a PHP system
     whose request handlers are short-lived and synchronous and cannot
     hold a stream open (R7).
 21. **`prompt` and `response` are returned; `info` is not** (§8.3). The
@@ -2009,7 +2003,7 @@ appends `pending` (sequence 1) and then calls `dispatch()`, which
 appends `active` (sequence 2) — both before `submit` returns, and both
 before the client has the id to poll with. The sequence is right; a poll
 simply may never catch that state. The events table is the record, and a
-subscriber arriving later replays both events in order (§7.3). A
+live client arriving later replays both events in order (§7.3). A
 prompt's *state* being unobservable at a moment is not the same as the
 *event* being lost, and M's guarantee is about the event history, not
 about what a poll happens to catch.

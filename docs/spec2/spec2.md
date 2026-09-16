@@ -22,12 +22,14 @@ Exact contracts live in the focused spec files:
 | `CTGPromptServer` | [class](./classes/CTGPromptServer/class.md), [types](./classes/CTGPromptServer/types.md) |
 | `CTGPromptServerError` | [class](./classes/CTGPromptServerError/class.md), [types](./classes/CTGPromptServerError/types.md) |
 | `CTGPromptServerRequestError` | [class](./classes/CTGPromptServerRequestError/class.md), [types](./classes/CTGPromptServerRequestError/types.md) |
+| `CTGPromptServerValidation` | [class](./classes/CTGPromptServerValidation/class.md), [types](./classes/CTGPromptServerValidation/types.md) |
 
 ---
 
 ## Architecture
 
-The service has five primary boundaries:
+The service has five primary runtime boundaries plus one static
+validation utility:
 
 | Boundary | Responsibility |
 |---|---|
@@ -36,6 +38,7 @@ The service has five primary boundaries:
 | `CTGPromptServerDB` | Owns SQLite access for prompt queue records. It does not know about HTTP, SSE, runners, or live clients. |
 | `CTGPromptServerError` | Owns normalized error labels, application error codes, and JSON-safe error results. |
 | `CTGPromptServerRequestError` | Owns HTTP status values for request errors. |
+| `CTGPromptServerValidation` | Static-only primitive validation helpers used by class implementations. |
 
 The durable unit is a `CTGPromptServerQueueRecord`. The upstream
 `ctg-ai-agent-proc` `LLMPrompt` type is a prompt-construction object; it

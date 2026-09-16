@@ -13,8 +13,8 @@ const expectedStatus = {
     CANCELLED: 5
 };
 
-export default CTGTest.init("spec2 CTGPromptServerQueue status")
-    .assert("STATUS exposes the spec2 label-to-code registry", async () => {
+export default CTGTest.init("CTGPromptServerQueue status")
+    .assert("STATUS exposes the label-to-code registry", async () => {
         const mod = await loadPublicModule();
         const Queue = asQueueConstructor(mod.CTGPromptServerQueue);
 

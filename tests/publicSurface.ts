@@ -10,8 +10,8 @@ const expectedClassExports = [
     "CTGPromptServerRequestError"
 ] as const;
 
-export default CTGTest.init("spec2 public surface")
-    .assert("spec2 class exports are present and constructable", async () => {
+export default CTGTest.init("public surface")
+    .assert("class exports are present and constructable", async () => {
         const mod = await loadPublicModule();
 
         return Object.fromEntries(expectedClassExports.map((name) => {
@@ -24,7 +24,7 @@ export default CTGTest.init("spec2 public surface")
         CTGPromptServerError: "function",
         CTGPromptServerRequestError: "function"
     }))
-    .assert("spec2 renamed DB and queue exports preserve class identity", async () => {
+    .assert("renamed DB and queue exports preserve class identity", async () => {
         const mod = await loadPublicModule();
 
         return {

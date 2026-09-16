@@ -3,7 +3,7 @@
 A durable prompt service that exposes one configured `ctg-ai-agent-proc`
 runner over HTTP, SQLite, and Server-Sent Events.
 
-The behavioral contract is [docs/spec.md](./docs/spec.md).
+The active behavioral contract is [docs/spec2/spec2.md](./docs/spec2/spec2.md).
 
 ## Install
 
@@ -19,8 +19,9 @@ npm install
 tag and builds `dist/`. Node.js 22.22 or newer is expected for
 `node:sqlite`.
 
-To use the classes (`CTGPromptServer`, `CTGPromptDB`, and the rest) from
-another project instead, install it as a dependency from GitHub:
+To use the classes (`CTGPromptServer`, `CTGPromptServerDB`,
+`CTGPromptServerQueue`, and the rest) from another project instead,
+install it as a dependency from GitHub:
 
 ```sh
 npm install github:claymoretechgroup/ctg-ts-prompt-server
@@ -86,7 +87,7 @@ For Docker bridge deployments, set `host` to the bridge address or
 |---|---|---|---|
 | `POST` | `/prompt` | `202` | JSON body `{ "prompt": string }` |
 | `GET` | `/prompt/:id` | `200` | optional `?wait=<ms>` |
-| `GET` | `/prompt/:id/events` | `200` SSE | optional `Last-Event-ID` header |
+| `GET` | `/sse/:id` | `200` SSE | none |
 | `DELETE` | `/prompt/:id` | `200` | none |
 | `GET` | `/prompts` | `200` | optional `?limit=&before=` |
 | `GET` | `/prompts/:status` | `200` | `status` is one of `pending`, `active`, `done`, `error`, `cancelled` |
@@ -100,7 +101,7 @@ JSON responses use:
 Errors use:
 
 ```json
-{ "success": false, "result": { "type": "INVALID_QUERY", "code": 1006, "message": "Invalid query." } }
+{ "success": false, "result": { "code": 10, "message": "Invalid query." } }
 ```
 
 ## SSE
@@ -108,8 +109,7 @@ Errors use:
 ```sh
 curl -N \
   -H "Authorization: Bearer $PROMPT_SERVER_API_KEY" \
-  -H "Last-Event-ID: 2" \
-  http://127.0.0.1:8080/prompt/1/events
+  http://127.0.0.1:8080/sse/1
 ```
 
 Each event frame is:
@@ -121,9 +121,8 @@ data: <JSON payload>
 
 ```
 
-The stream replays durable history after `Last-Event-ID`, sends live
-events, writes `: keep-alive` comments while open, and ends after
-`done`, `error`, or `cancelled`.
+The stream sends live events, writes `: keep-alive` comments while open,
+and ends after a terminal prompt state.
 
 ## Long Poll
 
@@ -134,7 +133,7 @@ curl \
 ```
 
 The response is `200` whether the prompt finished or the wait elapsed.
-Read `result.status` and `result.response`.
+Read `result.statusCode` and `result.response`.
 
 ## Operations
 
@@ -144,15 +143,15 @@ PROMPT_SERVER_DB=prompts.db npm run purge-finished
 
 | Script | Method | Deletes | Touches `pending` / `active` |
 |---|---|---|---|
-| `purge-finished` | `purgeFinished()` | `done`, `error`, `cancelled` rows and their events | no |
-| `purge-all` | `purgeAll()` | every prompt and every event | **yes** — empties the queue |
-| `reset-everything` | `reset()` | drops `events`, `prompts`, and the index, then applies `schema.sql` | **yes** — and the id sequence restarts at 1 |
+| `purge-finished` | `purgeFinished()` | `done`, `error`, `cancelled` records | no |
+| `purge-all` | `purgeAll()` | every prompt record | **yes** — empties the queue |
+| `reset-everything` | `reset()` | drops `prompts` and the index, then applies `schema.sql` | **yes** — and the id sequence restarts at 1 |
 
 Each command uses `PROMPT_SERVER_DB`, defaulting to `prompts.db`, prints
 the deleted prompt count or `reset`, and closes the database.
 
 **`purge-all` and `reset-everything` are for a stopped server.** They
 cannot tell whether a server holds the file. Run against a live one, an
-active prompt's next event append finds no row and the run ends as a
-`SERVER` outcome (§5.4 step 6), and recovery on the next `start` has
-nothing to recover.
+active prompt's next response append finds no row and the run records an
+internal prompt failure, and recovery on the next `start` has nothing to
+recover.

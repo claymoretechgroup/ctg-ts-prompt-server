@@ -24,7 +24,7 @@
     "build:package": "run-s clean compile:package",
     "prepare": "npm run build:package",
     "test": "tsx tests/test.ts",
-    "test:spec2": "tsx tests/spec2/test.ts",
+    "test:spec": "tsx tests/test.ts",
     "start": "tsx scripts/start.ts",
     "purge-finished": "tsx scripts/purge-finished.ts",
     "purge-all": "tsx scripts/purge-all.ts",

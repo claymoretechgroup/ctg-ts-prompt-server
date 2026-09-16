@@ -1,8 +1,8 @@
 // Dependencies:
-import { CTGPromptDB } from "../src/index.ts"; // Public DB reset API
+import { CTGPromptServerDB } from "../src/index.ts"; // Public DB reset API
 
 const path = process.env.PROMPT_SERVER_DB ?? "prompts.db";
-const db = CTGPromptDB.init({ path });
+const db = CTGPromptServerDB.init({ path });
 
 try {
     db.reset();

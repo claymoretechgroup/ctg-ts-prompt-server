@@ -1,62 +1,35 @@
 // Dependencies:
-import { readFileSync } from "node:fs";                      // Loads the package root schema.sql at database open/reset
-import { DatabaseSync } from "node:sqlite";                 // Synchronous SQLite database required by the spec
-import CTGPromptServerError from "../CTGPromptServerError/CTGPromptServerError.js"; // Typed storage errors
+import { readFileSync } from "node:fs";                          // Loads schema.sql at database open
+import { DatabaseSync } from "node:sqlite";                       // Synchronous SQLite database required by spec2
+import CTGPromptServerError from "../CTGPromptServerError/CTGPromptServerError.js"; // Normalized server errors
 
 // Type dependencies:
 import type {
-    AppendedEvent,                                           // Append result shape
-    ClaimedPrompt,                                           // Claim result shape
-    CTGPromptServerDBConfig,                                       // DB factory config
-    EventRecord,                                             // Durable event record
-    PromptEventName,                                         // Event name literals
-    PromptListPage,                                          // Prompt list page
-    PromptListQuery,                                         // Prompt list query
-    PromptOutcome,                                           // Finished outcome data
-    PromptOutcomeErrorType,                                  // Outcome error class
-    PromptRecord,                                            // Durable prompt record
-    PromptStatus,                                            // Prompt status literals
-    RunnerKind                                               // Runner kind literals
+    CTGPromptPagination,                                          // Spec2 pagination query
+    CTGPromptPaginationPage,                                      // Spec2 pagination page
+    CTGPromptServerDBConfig,                                      // DB factory config
+    CTGPromptServerQueueRecord,                                   // Spec2 durable queue record
+    RunnerKind                                                    // Runner kind literals
 } from "../types.js";
+import type {
+    PromptRow,                                                    // Raw prompt table row
+    SchemaRow,                                                    // Raw sqlite_master row
+    TableInfoRow                                                  // Raw PRAGMA table_info row
+} from "./types.js";
 
 /**
  *
- * Type Declarations
+ * Constants
  *
  */
 
-// TYPE :: ARRAY<STRING, UNKNOWN>
-// Raw prompt row returned by node:sqlite.
-interface PromptRow {
-    readonly id: unknown;                                    // Prompt identity
-    readonly status: unknown;                                // Stored lifecycle state
-    readonly prompt: unknown;                                // Stored prompt text
-    readonly response: unknown;                              // Stored response text
-    readonly error_type: unknown;                            // Stored outcome error class
-    readonly error_message: unknown;                         // Stored failure message
-    readonly info: unknown;                                  // JSON diagnostics text
-    readonly runner: unknown;                                // Stored runner kind
-    readonly next_sequence: unknown;                         // Next event sequence
-    readonly created_at: unknown;                            // Submit timestamp
-    readonly started_at: unknown;                            // Claim timestamp
-    readonly finished_at: unknown;                           // Finished timestamp
-}
-
-// TYPE :: ARRAY<STRING, UNKNOWN>
-// Raw event row returned by node:sqlite.
-interface EventRow {
-    readonly prompt_id: unknown;                             // Owning prompt id
-    readonly sequence: unknown;                              // Event sequence
-    readonly name: unknown;                                  // Event name
-    readonly payload: unknown;                               // JSON payload text
-    readonly created_at: unknown;                            // Event timestamp
-}
-
-// TYPE :: ARRAY<STRING, UNKNOWN>
-// Raw sqlite_master row used to check for an initialized database.
-interface SchemaRow {
-    readonly name: unknown;                                  // Schema object name
-}
+const STATUS = {
+    PENDING: 1,
+    ACTIVE: 2,
+    DONE: 3,
+    ERROR: -1,
+    CANCELLED: 5
+} as const;
 
 /**
  *
@@ -64,11 +37,11 @@ interface SchemaRow {
  *
  */
 
-// Synchronous SQLite prompt and event store.
+// Synchronous SQLite prompt queue record store.
 export default class CTGPromptServerDB {
 
     /* Instance Fields */
-    private readonly _db: DatabaseSync;                       // Underlying SQLite connection
+    private readonly _db: DatabaseSync;                           // Underlying SQLite connection
 
     // CONSTRUCTOR :: ctgPromptServerDBConfig -> this
     // Opens the SQLite database and creates or verifies the required schema.
@@ -77,7 +50,7 @@ export default class CTGPromptServerDB {
         this._db.exec("PRAGMA journal_mode = WAL;");
         this._db.exec("PRAGMA foreign_keys = ON;");
         this._db.exec("PRAGMA busy_timeout = 5000;");
-        this._openSchema(config.initDB ?? true);
+        openSchema(this._db, config.initDB ?? true);
     }
 
     /**
@@ -86,48 +59,41 @@ export default class CTGPromptServerDB {
      *
      */
 
-    // METHOD :: STRING -> promptRecord
-    // Inserts a pending prompt and its first lifecycle event.
-    insertPrompt(prompt: string): PromptRecord {
-        return this._transaction(() => {
+    // METHOD :: STRING -> ctgPromptServerQueueRecord
+    // Inserts one pending prompt queue record.
+    create(prompt: string): CTGPromptServerQueueRecord {
+        return transaction(this._db, () => {
             const now = Date.now();
             const result = this._db.prepare(`
-                INSERT INTO prompts (status, prompt, response, created_at)
-                VALUES ('pending', ?, '', ?)
-            `).run(prompt, now);
-            const id = Number(result.lastInsertRowid);
-            const event = this._appendEventInTransaction(id, "pending", {
-                promptId: id,
-                status: "pending",
-                createdAt: now
-            });
+                INSERT INTO prompts (status_code, prompt, response, created_at)
+                VALUES (?, ?, '', ?)
+            `).run(STATUS.PENDING, prompt, now);
 
-            return event.prompt;
+            return readRequired(this._db, Number(result.lastInsertRowid));
         });
     }
 
-    // METHOD :: NUMBER -> promptRecord?
-    // Reads one prompt by id.
-    readPrompt(id: number): PromptRecord | undefined {
+    // METHOD :: NUMBER -> ctgPromptServerQueueRecord?
+    // Reads one prompt queue record by id.
+    read(id: number): CTGPromptServerQueueRecord | null {
         const row = this._db.prepare("SELECT * FROM prompts WHERE id = ?").get(id) as PromptRow | undefined;
 
-        return row === undefined ? undefined : CTGPromptServerDB._promptFromRow(row);
+        return row === undefined ? null : recordFromRow(row);
     }
 
-    // METHOD :: promptListQuery -> promptListPage
-    // Lists prompts newest first with cursor pagination.
-    listPrompts(query: PromptListQuery): PromptListPage {
-        const limit = query.limit ?? 50;
+    // METHOD :: ctgPromptPagination -> ctgPromptPaginationPage
+    // Lists records newest first with cursor pagination.
+    paginate(pagination: CTGPromptPagination): CTGPromptPaginationPage {
         const filters: string[] = [];
-        const params: Array<string | number> = [];
+        const params: Array<number | string> = [];
 
-        if (query.status !== undefined) {
-            filters.push("status = ?");
-            params.push(query.status);
+        if (pagination.statusCode !== undefined) {
+            filters.push("status_code = ?");
+            params.push(pagination.statusCode);
         }
-        if (query.before !== undefined) {
+        if (pagination.before !== undefined) {
             filters.push("id < ?");
-            params.push(query.before);
+            params.push(pagination.before);
         }
 
         const where = filters.length === 0 ? "" : ` WHERE ${filters.join(" AND ")}`;
@@ -135,214 +101,234 @@ export default class CTGPromptServerDB {
             SELECT * FROM prompts${where}
             ORDER BY id DESC
             LIMIT ?
-        `).all(...params, limit + 1) as unknown as PromptRow[];
-        const hasNext = rows.length > limit;
-        const pageRows = hasNext ? rows.slice(0, limit) : rows;
-        const prompts = pageRows.map((row) => CTGPromptServerDB._promptFromRow(row));
-        const last = prompts.at(-1);
+        `).all(...params, pagination.limit + 1) as unknown as PromptRow[];
+        const hasNext = rows.length > pagination.limit;
+        const pageRows = hasNext ? rows.slice(0, pagination.limit) : rows;
+        const records = pageRows.map((row) => recordFromRow(row));
+        const last = records.at(-1);
 
         return {
-            prompts,
+            records,
             nextBefore: hasNext && last !== undefined ? last.id : null
         };
     }
 
-    // METHOD :: runnerKind -> claimedPrompt?
-    // Claims the oldest pending prompt and writes the active event.
-    claimNextPending(runner: RunnerKind): ClaimedPrompt | undefined {
-        return this._transaction(() => {
+    // METHOD :: ctgPromptServerQueueRecord -> ctgPromptServerQueueRecord
+    // Persists mutable record fields.
+    update(record: CTGPromptServerQueueRecord): CTGPromptServerQueueRecord {
+        return transaction(this._db, () => {
+            const result = this._db.prepare(`
+                UPDATE prompts
+                SET status_code = ?,
+                    response = ?,
+                    error_code = ?,
+                    error_message = ?,
+                    runner = ?,
+                    started_at = ?,
+                    finished_at = ?
+                WHERE id = ?
+            `).run(
+                record.statusCode,
+                record.response,
+                record.errorCode,
+                record.errorMessage,
+                record.runner,
+                record.startedAt,
+                record.finishedAt,
+                record.id
+            );
+
+            if (Number(result.changes) === 0) {
+                throw new CTGPromptServerError(CTGPromptServerError.CODE.PROMPT_NOT_FOUND, "Prompt not found.");
+            }
+
+            return readRequired(this._db, record.id);
+        });
+    }
+
+    // METHOD :: NUMBER -> ctgPromptServerQueueRecord?
+    // Deletes one prompt queue record by id.
+    delete(id: number): CTGPromptServerQueueRecord | null {
+        return transaction(this._db, () => {
+            const record = this.read(id);
+
+            if (record === null) {
+                return null;
+            }
+
+            this._db.prepare("DELETE FROM prompts WHERE id = ?").run(id);
+
+            return record;
+        });
+    }
+
+    // METHOD :: NUMBER, STRING -> ctgPromptServerQueueRecord
+    // Atomically appends response text.
+    append(id: number, text: string): CTGPromptServerQueueRecord {
+        return transaction(this._db, () => {
+            const result = this._db.prepare(`
+                UPDATE prompts
+                SET response = response || ?
+                WHERE id = ?
+            `).run(text, id);
+
+            if (Number(result.changes) === 0) {
+                throw new CTGPromptServerError(CTGPromptServerError.CODE.PROMPT_NOT_FOUND, "Prompt not found.");
+            }
+
+            return readRequired(this._db, id);
+        });
+    }
+
+    // METHOD :: VOID -> ctgPromptServerQueueRecord?
+    // Claims the oldest pending prompt.
+    claimNext(): CTGPromptServerQueueRecord | null {
+        return transaction(this._db, () => {
             while (true) {
                 const row = this._db.prepare(`
                     SELECT * FROM prompts
-                    WHERE status = 'pending'
+                    WHERE status_code = ?
                     ORDER BY id ASC
                     LIMIT 1
-                `).get() as PromptRow | undefined;
+                `).get(STATUS.PENDING) as PromptRow | undefined;
 
                 if (row === undefined) {
-                    return undefined;
+                    return null;
                 }
 
-                const id = CTGPromptServerDB._number(row.id);
+                const id = numberFrom(row.id);
                 const startedAt = Date.now();
                 const update = this._db.prepare(`
                     UPDATE prompts
-                    SET status = 'active', started_at = ?, runner = ?
-                    WHERE id = ? AND status = 'pending'
-                `).run(startedAt, runner, id);
+                    SET status_code = ?, started_at = ?
+                    WHERE id = ? AND status_code = ?
+                `).run(STATUS.ACTIVE, startedAt, id, STATUS.PENDING);
 
                 if (Number(update.changes) === 0) {
                     continue;
                 }
 
-                const appended = this._appendEventInTransaction(id, "active", {
-                    promptId: id,
-                    status: "active",
-                    runner,
-                    startedAt
-                });
-
-                return {
-                    prompt: appended.prompt,
-                    event: appended.event
-                };
+                return readRequired(this._db, id);
             }
         });
     }
 
-    // METHOD :: NUMBER, promptOutcome -> appendedEvent
-    // Records a finished prompt outcome and terminal event.
-    finishPrompt(id: number, outcome: PromptOutcome): AppendedEvent {
-        return this._transaction(() => {
-            const existing = this.readPrompt(id);
+    // METHOD :: NUMBER, OBJECT -> ctgPromptServerQueueRecord
+    // Moves a record to a terminal done or error status.
+    finish(id: number, outcome: {
+        readonly statusCode: number;
+        readonly response?: string;
+        readonly errorCode?: number;
+        readonly errorMessage?: string;
+    }): CTGPromptServerQueueRecord {
+        return transaction(this._db, () => {
+            const existing = this.read(id);
 
-            if (existing === undefined) {
-                throw new CTGPromptServerError("PROMPT_NOT_FOUND", "Prompt not found.");
+            if (existing === null) {
+                throw new CTGPromptServerError(CTGPromptServerError.CODE.PROMPT_NOT_FOUND, "Prompt not found.");
             }
 
             const finishedAt = Date.now();
-            const response = outcome.status === "done" ? outcome.response ?? "" : existing.response;
-            const errorType = outcome.status === "error" ? outcome.errorType ?? "SERVER" : null;
-            const errorMessage = outcome.status === "error" ? outcome.errorMessage ?? "" : null;
-            const info = outcome.info === undefined ? null : JSON.stringify(outcome.info);
+
+            if (outcome.statusCode === STATUS.DONE) {
+                this._db.prepare(`
+                    UPDATE prompts
+                    SET status_code = ?, response = ?, error_code = NULL, error_message = NULL, finished_at = ?
+                    WHERE id = ?
+                `).run(STATUS.DONE, outcome.response ?? existing.response, finishedAt, id);
+
+                return readRequired(this._db, id);
+            }
+
+            if (outcome.statusCode === STATUS.ERROR) {
+                this._db.prepare(`
+                    UPDATE prompts
+                    SET status_code = ?, error_code = ?, error_message = ?, finished_at = ?
+                    WHERE id = ?
+                `).run(
+                    STATUS.ERROR,
+                    outcome.errorCode ?? CTGPromptServerError.CODE.INTERNAL_ERROR,
+                    outcome.errorMessage ?? "Internal error.",
+                    finishedAt,
+                    id
+                );
+
+                return readRequired(this._db, id);
+            }
+
+            throw new CTGPromptServerError(CTGPromptServerError.CODE.INTERNAL_ERROR, "Invalid finish status code.", {
+                statusCode: outcome.statusCode
+            });
+        });
+    }
+
+    // METHOD :: NUMBER -> ctgPromptServerQueueRecord
+    // Cancels only pending records.
+    cancel(id: number): CTGPromptServerQueueRecord {
+        return transaction(this._db, () => {
+            const existing = this.read(id);
+
+            if (existing === null) {
+                throw new CTGPromptServerError(CTGPromptServerError.CODE.PROMPT_NOT_FOUND, "Prompt not found.");
+            }
+            if (existing.statusCode !== STATUS.PENDING) {
+                throw new CTGPromptServerError(CTGPromptServerError.CODE.CANCEL_NOT_ALLOWED, "The prompt cannot be cancelled.", {
+                    id,
+                    statusCode: existing.statusCode
+                });
+            }
+
+            const finishedAt = Date.now();
 
             this._db.prepare(`
                 UPDATE prompts
-                SET status = ?, response = ?, error_type = ?, error_message = ?, info = ?, finished_at = ?
-                WHERE id = ?
-            `).run(outcome.status, response, errorType, errorMessage, info, finishedAt, id);
+                SET status_code = ?, finished_at = ?
+                WHERE id = ? AND status_code = ?
+            `).run(STATUS.CANCELLED, finishedAt, id, STATUS.PENDING);
 
-            if (outcome.status === "done") {
-                return this._appendEventInTransaction(id, "done", {
-                    promptId: id,
-                    status: "done",
-                    response,
-                    finishedAt
-                });
-            }
-
-            return this._appendEventInTransaction(id, "error", {
-                promptId: id,
-                status: "error",
-                errorType,
-                message: errorMessage,
-                finishedAt
-            });
-        });
-    }
-
-    // METHOD :: NUMBER -> appendedEvent
-    // Cancels a pending prompt and writes the cancelled event.
-    cancelPending(id: number): AppendedEvent {
-        return this._transaction(() => {
-            const existing = this.readPrompt(id);
-
-            if (existing === undefined) {
-                throw new CTGPromptServerError("PROMPT_NOT_FOUND", "Prompt not found.");
-            }
-
-            const finishedAt = Date.now();
-            const update = this._db.prepare(`
-                UPDATE prompts
-                SET status = 'cancelled', finished_at = ?
-                WHERE id = ? AND status = 'pending'
-            `).run(finishedAt, id);
-
-            if (Number(update.changes) === 0) {
-                const reread = this.readPrompt(id);
-
-                throw new CTGPromptServerError("CANCEL_NOT_ALLOWED", "The prompt is already finished.", {
-                    id,
-                    status: reread?.status
-                });
-            }
-
-            return this._appendEventInTransaction(id, "cancelled", {
-                promptId: id,
-                status: "cancelled",
-                finishedAt
-            });
+            return readRequired(this._db, id);
         });
     }
 
     // METHOD :: VOID -> NUMBER
     // Interrupts active prompts from a previous process.
     interruptActive(): number {
-        return this._transaction(() => {
-            const rows = this._db.prepare(`
-                SELECT * FROM prompts
-                WHERE status = 'active'
-                ORDER BY id ASC
-            `).all() as unknown as PromptRow[];
+        return transaction(this._db, () => {
             const now = Date.now();
             const message = "The prompt was active when the server stopped.";
-
-            this._db.prepare(`
-                UPDATE prompts
-                SET status = 'error', error_type = 'INTERRUPTED', error_message = ?, finished_at = ?
-                WHERE status = 'active'
-            `).run(message, now);
-
-            for (const row of rows) {
-                const id = CTGPromptServerDB._number(row.id);
-
-                this._appendEventInTransaction(id, "error", {
-                    promptId: id,
-                    status: "error",
-                    errorType: "INTERRUPTED",
-                    message,
-                    finishedAt: now
-                });
-            }
-
-            return rows.length;
-        });
-    }
-
-    // METHOD :: NUMBER, promptEventName, UNKNOWN, STRING? -> appendedEvent
-    // Appends an event and optionally appends response text in the same transaction.
-    appendEvent(id: number, name: PromptEventName, payload: unknown, appendResponse?: string): AppendedEvent {
-        return this._transaction(() => this._appendEventInTransaction(id, name, payload, appendResponse));
-    }
-
-    // METHOD :: NUMBER, NUMBER -> [eventRecord]
-    // Reads events after a sequence number.
-    readEvents(id: number, afterSequence: number): EventRecord[] {
-        const rows = this._db.prepare(`
-            SELECT * FROM events
-            WHERE prompt_id = ? AND sequence > ?
-            ORDER BY sequence ASC
-        `).all(id, afterSequence) as unknown as EventRow[];
-
-        return rows.map((row) => CTGPromptServerDB._eventFromRow(row));
-    }
-
-    // METHOD :: NUMBER -> NUMBER
-    // Returns the latest event sequence for a prompt.
-    lastSequence(id: number): number {
-        const record = this.readPrompt(id);
-
-        return record?.lastSequence ?? 0;
-    }
-
-    // METHOD :: VOID -> NUMBER
-    // Deletes finished prompts and cascaded events.
-    purgeFinished(): number {
-        return this._transaction(() => {
             const result = this._db.prepare(`
-                DELETE FROM prompts
-                WHERE status IN ('done', 'error', 'cancelled')
-            `).run();
+                UPDATE prompts
+                SET status_code = ?, error_code = ?, error_message = ?, finished_at = ?
+                WHERE status_code = ?
+            `).run(
+                STATUS.ERROR,
+                CTGPromptServerError.CODE.PROMPT_INTERRUPTED,
+                message,
+                now,
+                STATUS.ACTIVE
+            );
 
             return Number(result.changes);
         });
     }
 
     // METHOD :: VOID -> NUMBER
-    // Deletes every prompt and cascaded event.
-    // WARNING: This empties pending and active work.
+    // Deletes terminal prompt records.
+    purgeFinished(): number {
+        return transaction(this._db, () => {
+            const result = this._db.prepare(`
+                DELETE FROM prompts
+                WHERE status_code IN (?, ?, ?)
+            `).run(STATUS.DONE, STATUS.ERROR, STATUS.CANCELLED);
+
+            return Number(result.changes);
+        });
+    }
+
+    // METHOD :: VOID -> NUMBER
+    // Deletes every prompt record.
     purgeAll(): number {
-        return this._transaction(() => {
+        return transaction(this._db, () => {
             const result = this._db.prepare("DELETE FROM prompts").run();
 
             return Number(result.changes);
@@ -350,13 +336,11 @@ export default class CTGPromptServerDB {
     }
 
     // METHOD :: VOID -> VOID
-    // Drops and recreates the prompt schema.
-    // WARNING: This deletes all prompt history and restarts ids.
+    // Drops and recreates the spec2 schema.
     reset(): void {
-        this._transaction(() => {
-            this._db.exec("DROP TABLE IF EXISTS events;");
+        transaction(this._db, () => {
             this._db.exec("DROP TABLE IF EXISTS prompts;");
-            this._db.exec(CTGPromptServerDB._schemaSQL());
+            this._db.exec(schemaSQL());
         });
     }
 
@@ -365,96 +349,6 @@ export default class CTGPromptServerDB {
     close(): void {
         if (this._db.isOpen) {
             this._db.close();
-        }
-    }
-
-    /**
-     *
-     * Private Methods
-     *
-     */
-
-    // METHOD :: BOOLEAN -> VOID
-    // Creates or verifies the prompt schema after pragmas are applied.
-    private _openSchema(initDB: boolean): void {
-        if (this._hasPromptsTable()) {
-            return;
-        }
-        if (initDB) {
-            this._db.exec(CTGPromptServerDB._schemaSQL());
-            return;
-        }
-
-        this.close();
-        throw new CTGPromptServerError("INVALID_CONFIG", "Database has no prompts table; run reset-everything or enable initDB.");
-    }
-
-    // METHOD :: VOID -> BOOLEAN
-    // Checks whether the prompts table exists.
-    private _hasPromptsTable(): boolean {
-        const row = this._db.prepare(`
-            SELECT name FROM sqlite_master
-            WHERE type = 'table' AND name = 'prompts'
-        `).get() as SchemaRow | undefined;
-
-        return row !== undefined;
-    }
-
-    // METHOD :: NUMBER, promptEventName, UNKNOWN, STRING? -> appendedEvent
-    // Appends an event inside an existing transaction.
-    private _appendEventInTransaction(id: number, name: PromptEventName, payload: unknown, appendResponse?: string): AppendedEvent {
-        const row = this._db.prepare("SELECT next_sequence FROM prompts WHERE id = ?").get(id) as { next_sequence: unknown } | undefined;
-
-        if (row === undefined) {
-            throw new CTGPromptServerError("PROMPT_NOT_FOUND", "Prompt not found.");
-        }
-
-        const sequence = CTGPromptServerDB._number(row.next_sequence);
-        const createdAt = Date.now();
-
-        this._db.prepare(`
-            INSERT INTO events (prompt_id, sequence, name, payload, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        `).run(id, sequence, name, JSON.stringify(payload), createdAt);
-
-        if (appendResponse === undefined) {
-            this._db.prepare("UPDATE prompts SET next_sequence = next_sequence + 1 WHERE id = ?").run(id);
-        } else {
-            this._db.prepare("UPDATE prompts SET next_sequence = next_sequence + 1, response = response || ? WHERE id = ?").run(appendResponse, id);
-        }
-
-        const prompt = this.readPrompt(id);
-
-        if (prompt === undefined) {
-            throw new CTGPromptServerError("PROMPT_NOT_FOUND", "Prompt not found.");
-        }
-
-        return {
-            prompt,
-            event: {
-                promptId: id,
-                sequence,
-                name,
-                payload,
-                createdAt
-            }
-        };
-    }
-
-    // METHOD :: (VOID -> T) -> T
-    // Runs a synchronous operation in one SQLite transaction.
-    private _transaction<T>(fn: () => T): T {
-        this._db.exec("BEGIN IMMEDIATE;");
-        try {
-            const result = fn();
-
-            this._db.exec("COMMIT;");
-            return result;
-        } catch (caught) {
-            if (this._db.isOpen && this._db.isTransaction) {
-                this._db.exec("ROLLBACK;");
-            }
-            throw caught;
         }
     }
 
@@ -469,67 +363,125 @@ export default class CTGPromptServerDB {
     static init(config: CTGPromptServerDBConfig): CTGPromptServerDB {
         return new this(config);
     }
-
-    /**
-     *
-     * Private Static Methods
-     *
-     */
-
-    // METHOD :: VOID -> STRING
-    // Reads the package root schema SQL.
-    private static _schemaSQL(): string {
-        return readFileSync(new URL("../../schema.sql", import.meta.url), "utf8");
-    }
-
-    // METHOD :: UNKNOWN -> NUMBER
-    // Narrows a SQLite number field.
-    private static _number(value: unknown): number {
-        return typeof value === "bigint" ? Number(value) : Number(value);
-    }
-
-    // METHOD :: UNKNOWN -> STRING?
-    // Converts a nullable SQLite text field.
-    private static _nullableString(value: unknown): string | null {
-        return typeof value === "string" ? value : null;
-    }
-
-    // METHOD :: UNKNOWN -> NUMBER?
-    // Converts a nullable SQLite integer field.
-    private static _nullableNumber(value: unknown): number | null {
-        return value === null || value === undefined ? null : CTGPromptServerDB._number(value);
-    }
-
-    // METHOD :: promptRow -> promptRecord
-    // Maps a database prompt row to the public record shape.
-    private static _promptFromRow(row: PromptRow): PromptRecord {
-        const info = typeof row.info === "string" ? JSON.parse(row.info) as Record<string, unknown> : null;
-
-        return {
-            id: CTGPromptServerDB._number(row.id),
-            status: row.status as PromptStatus,
-            prompt: String(row.prompt),
-            response: String(row.response),
-            errorType: CTGPromptServerDB._nullableString(row.error_type) as PromptOutcomeErrorType | null,
-            errorMessage: CTGPromptServerDB._nullableString(row.error_message),
-            info: info === null ? null : Object.freeze(info),
-            runner: CTGPromptServerDB._nullableString(row.runner) as RunnerKind | null,
-            lastSequence: CTGPromptServerDB._number(row.next_sequence) - 1,
-            createdAt: CTGPromptServerDB._number(row.created_at),
-            startedAt: CTGPromptServerDB._nullableNumber(row.started_at),
-            finishedAt: CTGPromptServerDB._nullableNumber(row.finished_at)
-        };
-    }
-
-    // METHOD :: eventRow -> eventRecord
-    // Maps a database event row to the public event shape.
-    private static _eventFromRow(row: EventRow): EventRecord {
-        return {
-            promptId: CTGPromptServerDB._number(row.prompt_id),
-            sequence: CTGPromptServerDB._number(row.sequence),
-            name: row.name as PromptEventName,
-            payload: JSON.parse(String(row.payload)) as unknown,
-            createdAt: CTGPromptServerDB._number(row.created_at)
-        };
-    }
 }
+
+/**
+ *
+ * Module Helpers
+ *
+ */
+
+// FUNCTION :: databaseSync, BOOLEAN -> VOID
+// Creates or verifies the prompt schema after pragmas are applied.
+const openSchema = (db: DatabaseSync, initDB: boolean): void => {
+    if (hasPromptsTable(db)) {
+        if (hasSpec2Columns(db)) {
+            return;
+        }
+
+        db.close();
+        throw new CTGPromptServerError(CTGPromptServerError.CODE.INVALID_CONFIG, "Database prompts table is not spec2-compatible.");
+    }
+    if (initDB) {
+        db.exec(schemaSQL());
+        return;
+    }
+
+    db.close();
+    throw new CTGPromptServerError(CTGPromptServerError.CODE.INVALID_CONFIG, "Database has no prompts table; enable initDB.");
+};
+
+// FUNCTION :: databaseSync -> BOOLEAN
+// Checks whether the prompts table exists.
+const hasPromptsTable = (db: DatabaseSync): boolean => {
+    const row = db.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'prompts'
+    `).get() as SchemaRow | undefined;
+
+    return row !== undefined;
+};
+
+// FUNCTION :: databaseSync -> BOOLEAN
+// Checks whether the existing prompts table has the spec2 shape.
+const hasSpec2Columns = (db: DatabaseSync): boolean => {
+    const rows = db.prepare("PRAGMA table_info(prompts)").all() as unknown as TableInfoRow[];
+    const names = new Set(rows.map((row) => String(row.name)));
+
+    return names.has("status_code")
+        && names.has("error_code")
+        && !names.has("status")
+        && !names.has("error_type")
+        && !names.has("info")
+        && !names.has("next_sequence");
+};
+
+// FUNCTION :: databaseSync, NUMBER -> ctgPromptServerQueueRecord
+// Reads an existing record or throws PROMPT_NOT_FOUND.
+const readRequired = (db: DatabaseSync, id: number): CTGPromptServerQueueRecord => {
+    const row = db.prepare("SELECT * FROM prompts WHERE id = ?").get(id) as PromptRow | undefined;
+
+    if (row === undefined) {
+        throw new CTGPromptServerError(CTGPromptServerError.CODE.PROMPT_NOT_FOUND, "Prompt not found.");
+    }
+
+    return recordFromRow(row);
+};
+
+// FUNCTION :: databaseSync, FUNCTION -> UNKNOWN
+// Runs a synchronous operation in one SQLite transaction.
+const transaction = <Result>(db: DatabaseSync, fn: () => Result): Result => {
+    db.exec("BEGIN IMMEDIATE;");
+    try {
+        const result = fn();
+
+        db.exec("COMMIT;");
+        return result;
+    } catch (caught) {
+        if (db.isOpen && db.isTransaction) {
+            db.exec("ROLLBACK;");
+        }
+        throw caught;
+    }
+};
+
+// FUNCTION :: VOID -> STRING
+// Reads the package root schema SQL.
+const schemaSQL = (): string => {
+    return readFileSync(new URL("../../schema.sql", import.meta.url), "utf8");
+};
+
+// FUNCTION :: UNKNOWN -> NUMBER
+// Narrows a SQLite number field.
+const numberFrom = (value: unknown): number => {
+    return typeof value === "bigint" ? Number(value) : Number(value);
+};
+
+// FUNCTION :: UNKNOWN -> STRING?
+// Converts a nullable SQLite text field.
+const nullableString = (value: unknown): string | null => {
+    return typeof value === "string" ? value : null;
+};
+
+// FUNCTION :: UNKNOWN -> NUMBER?
+// Converts a nullable SQLite integer field.
+const nullableNumber = (value: unknown): number | null => {
+    return value === null || value === undefined ? null : numberFrom(value);
+};
+
+// FUNCTION :: promptRow -> ctgPromptServerQueueRecord
+// Maps a database prompt row to the spec2 queue record shape.
+const recordFromRow = (row: PromptRow): CTGPromptServerQueueRecord => {
+    return {
+        id: numberFrom(row.id),
+        statusCode: numberFrom(row.status_code),
+        prompt: String(row.prompt),
+        response: String(row.response),
+        errorCode: nullableNumber(row.error_code),
+        errorMessage: nullableString(row.error_message),
+        runner: nullableString(row.runner) as RunnerKind | null,
+        createdAt: numberFrom(row.created_at),
+        startedAt: nullableNumber(row.started_at),
+        finishedAt: nullableNumber(row.finished_at)
+    };
+};

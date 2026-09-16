@@ -21,3 +21,4 @@ ownership guidance is defined in [spec2.types.md](./spec2.types.md).
 | `CTGPromptServer` | [class.md](./classes/CTGPromptServer/class.md) | [types.md](./classes/CTGPromptServer/types.md) | drafted |
 | `CTGPromptServerError` | [class.md](./classes/CTGPromptServerError/class.md) | [types.md](./classes/CTGPromptServerError/types.md) | drafted |
 | `CTGPromptServerRequestError` | [class.md](./classes/CTGPromptServerRequestError/class.md) | [types.md](./classes/CTGPromptServerRequestError/types.md) | drafted |
+| `CTGPromptServerValidation` | [class.md](./classes/CTGPromptServerValidation/class.md) | [types.md](./classes/CTGPromptServerValidation/types.md) | drafted |

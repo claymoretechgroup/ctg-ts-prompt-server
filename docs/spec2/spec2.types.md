@@ -36,6 +36,7 @@ database row.
 | `CTGPromptServer` | [classes/CTGPromptServer/types.md](./classes/CTGPromptServer/types.md) |
 | `CTGPromptServerError` | [classes/CTGPromptServerError/types.md](./classes/CTGPromptServerError/types.md) |
 | `CTGPromptServerRequestError` | [classes/CTGPromptServerRequestError/types.md](./classes/CTGPromptServerRequestError/types.md) |
+| `CTGPromptServerValidation` | [classes/CTGPromptServerValidation/types.md](./classes/CTGPromptServerValidation/types.md) |
 
 ## General Types
 

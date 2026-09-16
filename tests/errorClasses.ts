@@ -39,8 +39,8 @@ const requestFactories = [
     ["methodNotAllowed", "METHOD_NOT_ALLOWED", 405]
 ] as const;
 
-export default CTGTest.init("spec2 error classes")
-    .assert("CTGPromptServerError.CODE exposes the spec2 label-to-code registry", async () => {
+export default CTGTest.init("error classes")
+    .assert("CTGPromptServerError.CODE exposes the label-to-code registry", async () => {
         const mod = await loadPublicModule();
         const ServerError = asServerErrorConstructor(mod.CTGPromptServerError);
 

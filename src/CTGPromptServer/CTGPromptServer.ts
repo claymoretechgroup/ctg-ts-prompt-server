@@ -7,7 +7,9 @@ import { ClaudeRunner, CodexRunner } from "ctg-ai-agent-proc";      // Configure
 import CTGPromptServerDB from "../CTGPromptServerDB/CTGPromptServerDB.js"; // Durable prompt database
 import CTGPromptServerQueue from "../CTGPromptServerQueue/CTGPromptServerQueue.js"; // Prompt dispatcher
 import CTGPromptServerError from "../CTGPromptServerError/CTGPromptServerError.js"; // Typed server errors
-import CTGPromptSubscribers from "../CTGPromptSubscribers/CTGPromptSubscribers.js"; // Live event subscribers
+import CTGPromptServerRequestError from "../CTGPromptServerRequestError/CTGPromptServerRequestError.js"; // HTTP request errors
+import CTGPromptServerValidation from "../CTGPromptServerValidation/CTGPromptServerValidation.js"; // Shared validation helpers
+import bindRoutes from "./routes/index.js";                         // Aggregate route binder
 
 // Type dependencies:
 import type { ErrorRequestHandler, Express, NextFunction, Request, Response } from "express"; // Express host types
@@ -15,36 +17,14 @@ import type { LLMRunner } from "ctg-ai-agent-proc";                    // Runner
 import type {
     CTGPromptRunnerConfig,                                             // Runner construction config
     CTGPromptServerConfig,                                             // Server factory config
-    PromptListPage,                                                    // Serialized prompt list
-    PromptListQuery,                                                   // Route list query
-    PromptRecord,                                                      // Serialized prompt record
-    PromptStatus,                                                      // Status route literal
-    RunnerKind,                                                        // Runner kind literal
-    StreamMode                                                         // Stream mode literal
+    CTGPromptServerQueueRecord,                                        // Durable prompt record
+    CTGPromptServerQueueStreamMessage                                  // Live queue stream message
 } from "../types.js";
-
-/**
- *
- * Type Declarations
- *
- */
-
-// TYPE :: {runner:ctgPromptRunnerConfig, apiKey:STRING, host:STRING, database:STRING, initDB:BOOLEAN, concurrency:NUMBER, maxPromptBytes:NUMBER, streamMode:streamMode, keepAliveMs:NUMBER, maxWaitMs:NUMBER, defaultLimit:NUMBER, maxLimit:NUMBER}
-// Fully resolved server config.
-interface ResolvedServerConfig {
-    readonly runner: CTGPromptRunnerConfig;                            // Validated runner config
-    readonly apiKey: string;                                           // Shared bearer key
-    readonly host: string;                                             // Bind address
-    readonly database: string;                                         // SQLite path
-    readonly initDB: boolean;                                          // Whether DB schema creation is allowed
-    readonly concurrency: number;                                      // Run concurrency
-    readonly maxPromptBytes: number;                                  // Prompt byte ceiling
-    readonly streamMode: StreamMode;                                  // Runner stream mode
-    readonly keepAliveMs: number;                                     // SSE keep-alive cadence
-    readonly maxWaitMs: number;                                       // Long-poll ceiling
-    readonly defaultLimit: number;                                    // Default list size
-    readonly maxLimit: number;                                        // Maximum list size
-}
+import type {
+    CTGPromptSSESink,                                                  // SSE sink
+    CTGPromptSSESubscription,                                          // SSE subscription handle
+    CTGPromptWaiter                                                    // Long-poll waiter
+} from "./types.js";
 
 /**
  *
@@ -59,23 +39,25 @@ export default class CTGPromptServer {
     static readonly BODY_LIMIT_BYTES = 1048576;                      // Fixed JSON reader limit required by §8.1
 
     /* Instance Fields */
-    private readonly _config: ResolvedServerConfig;                    // Resolved construction config
+    private _config!: CTGPromptServerConfig;                           // Validated construction config
     private readonly _app: Express;                                    // Configured Express app
     private readonly _db: CTGPromptServerDB;                           // Durable prompt DB
-    private readonly _subscribers: CTGPromptSubscribers;               // Subscriber registry
+    private readonly _sse: Map<number, Set<CTGPromptSSESink>>;         // Live SSE sinks by prompt id
+    private readonly _waiters: Map<number, Set<CTGPromptWaiter>>;      // Long-poll waiters by prompt id
     private _queue: CTGPromptServerQueue | null;                       // Queue created at start()
     private _listener: Server | null;                                  // HTTP listener created at start()
     private _started: boolean;                                         // Whether start() has run
 
-    // CONSTRUCTOR :: resolvedServerConfig -> this
+    // CONSTRUCTOR :: ctgPromptServerConfig -> this
     // Creates a server over an already-open database and app.
-    protected constructor(config: ResolvedServerConfig) {
-        this._config = config;
+    protected constructor(config: CTGPromptServerConfig) {
+        this.validatedConfig = config;
         this._db = CTGPromptServerDB.init({
-            path: config.database,
-            initDB: config.initDB
+            path: this._config.database ?? "prompts.db",
+            initDB: this._config.initDB ?? true
         });
-        this._subscribers = CTGPromptSubscribers.init();
+        this._sse = new Map<number, Set<CTGPromptSSESink>>();
+        this._waiters = new Map<number, Set<CTGPromptWaiter>>();
         this._queue = null;
         this._listener = null;
         this._started = false;
@@ -100,11 +82,58 @@ export default class CTGPromptServer {
         return this._db;
     }
 
+    // GETTER :: VOID -> ctgPromptServerConfig
+    // Returns the validated server configuration.
+    get config(): CTGPromptServerConfig {
+        return this._config;
+    }
+
+    // SETTER :: ctgPromptServerConfig -> VOID
+    // Validates and stores server configuration with defaults applied.
+    private set validatedConfig(config: CTGPromptServerConfig) {
+        try {
+            if (!CTGPromptServerValidation.isObject(config)) {
+                throw new Error("Config must be an object.");
+            }
+            const runner = this.validatedRunnerConfig(config.runner);
+            const apiKey = CTGPromptServerValidation.nonEmptyString(config.apiKey, "apiKey");
+            const maxLimit = CTGPromptServerValidation.optionalInteger(config.maxLimit, "maxLimit", 1, undefined) ?? 200;
+            const defaultLimit = CTGPromptServerValidation.optionalInteger(config.defaultLimit, "defaultLimit", 1, undefined) ?? 50;
+
+            if (defaultLimit > maxLimit) {
+                throw new Error("defaultLimit must be <= maxLimit.");
+            }
+
+            this._config = {
+                runner,
+                apiKey,
+                host: config.host === undefined ? "127.0.0.1" : CTGPromptServerValidation.nonEmptyString(config.host, "host"),
+                database: config.database === undefined ? "prompts.db" : CTGPromptServerValidation.nonEmptyString(config.database, "database"),
+                initDB: CTGPromptServerValidation.optionalBoolean(config.initDB, "initDB") ?? true,
+                concurrency: CTGPromptServerValidation.optionalInteger(config.concurrency, "concurrency", 1, undefined) ?? 1,
+                maxPromptBytes: CTGPromptServerValidation.optionalInteger(config.maxPromptBytes, "maxPromptBytes", 1, 131071) ?? 131071,
+                streamMode: CTGPromptServerValidation.optionalStreamMode(config.streamMode, "streamMode") ?? "events",
+                keepAliveMs: CTGPromptServerValidation.optionalInteger(config.keepAliveMs, "keepAliveMs", 1000, undefined) ?? 15000,
+                maxWaitMs: CTGPromptServerValidation.optionalInteger(config.maxWaitMs, "maxWaitMs", 0, undefined) ?? 30000,
+                defaultLimit,
+                maxLimit
+            };
+        } catch (caught) {
+            if (CTGPromptServerError.is(caught)) {
+                throw caught;
+            }
+
+            throw new CTGPromptServerError(CTGPromptServerError.CODE.INVALID_CONFIG, caught instanceof Error ? caught.message : String(caught), {
+                cause: caught
+            });
+        }
+    }
+
     // GETTER :: VOID -> ctgPromptServerQueue
     // Returns the started queue.
     get queue(): CTGPromptServerQueue {
         if (this._queue === null) {
-            throw new CTGPromptServerError("INTERNAL_ERROR", "Server has not been started.");
+            throw new CTGPromptServerError(CTGPromptServerError.CODE.INTERNAL_ERROR, "Server has not been started.");
         }
 
         return this._queue;
@@ -120,10 +149,10 @@ export default class CTGPromptServer {
     // Starts the queue and binds the HTTP listener.
     async start(port: number): Promise<{ host: string; port: number }> {
         if (!Number.isInteger(port) || port < 0 || port > 65535) {
-            throw new CTGPromptServerError("INVALID_CONFIG", "Port must be an integer in 0..65535.");
+            throw new CTGPromptServerError(CTGPromptServerError.CODE.INVALID_CONFIG, "Port must be an integer in 0..65535.");
         }
         if (this._started) {
-            throw new CTGPromptServerError("INTERNAL_ERROR", "Server has already been started.");
+            throw new CTGPromptServerError(CTGPromptServerError.CODE.INTERNAL_ERROR, "Server has already been started.");
         }
 
         this._started = true;
@@ -133,28 +162,32 @@ export default class CTGPromptServer {
         try {
             runner = this.createRunner(this._config.runner);
         } catch (caught) {
-            throw new CTGPromptServerError("INVALID_CONFIG", caught instanceof Error ? caught.message : String(caught), {
+            throw new CTGPromptServerError(CTGPromptServerError.CODE.INVALID_CONFIG, caught instanceof Error ? caught.message : String(caught), {
                 cause: caught
             });
         }
 
         this._queue = CTGPromptServerQueue.init({
             db: this._db,
-            subscribers: this._subscribers,
             runner,
             runnerKind: this._config.runner.kind,
-            concurrency: this._config.concurrency,
-            maxPromptBytes: this._config.maxPromptBytes,
-            streamMode: this._config.streamMode,
-            maxWaitMs: this._config.maxWaitMs,
-            defaultLimit: this._config.defaultLimit,
-            maxLimit: this._config.maxLimit
+            concurrency: this._config.concurrency ?? 1,
+            maxPromptBytes: this._config.maxPromptBytes ?? 131071,
+            streamMode: this._config.streamMode ?? "events",
+            onStreamMessage: (message: CTGPromptServerQueueStreamMessage) => {
+                this.publishSSE(message);
+            },
+            onPromptFinished: (id: number) => {
+                this.notifyPromptFinished(id);
+            },
+            defaultLimit: this._config.defaultLimit ?? 50,
+            maxLimit: this._config.maxLimit ?? 200
         });
         this._queue.recover();
         this._queue.dispatch();
 
         return await new Promise<{ host: string; port: number }>((resolve, reject) => {
-            const listener = this._app.listen(port, this._config.host, () => {
+            const listener = this._app.listen(port, this._config.host ?? "127.0.0.1", () => {
                 this._listener = listener;
                 const address = listener.address();
 
@@ -166,7 +199,7 @@ export default class CTGPromptServer {
                     return;
                 }
 
-                reject(new CTGPromptServerError("INTERNAL_ERROR", "Could not read bound address."));
+                reject(new CTGPromptServerError(CTGPromptServerError.CODE.INTERNAL_ERROR, "Could not read bound address."));
             });
 
             listener.once("error", reject);
@@ -174,7 +207,7 @@ export default class CTGPromptServer {
     }
 
     // METHOD :: VOID -> PROMISE(VOID)
-    // Stops the listener, ends subscribers, and closes the database.
+    // Stops the listener, ends live streams, and closes the database.
     async close(): Promise<void> {
         const listener = this._listener;
 
@@ -190,15 +223,141 @@ export default class CTGPromptServer {
                 });
             });
 
-            this._subscribers.closeAll();
+            this.closeSSE();
             listener.closeAllConnections();
             await closed;
         } else {
-            this._subscribers.closeAll();
+            this.closeSSE();
         }
 
         this._db.close();
         this._listener = null;
+    }
+
+    // METHOD :: NUMBER, ctgPromptSSESink -> ctgPromptSSESubscription
+    // Registers one live SSE sink for a prompt.
+    openSSE(id: number, sink: CTGPromptSSESink): CTGPromptSSESubscription {
+        const record = this.queue.read(id);
+        const set = this._sse.get(id) ?? new Set<CTGPromptSSESink>();
+        let closed = false;
+
+        set.add(sink);
+        this._sse.set(id, set);
+
+        if (CTGPromptServer._isTerminal(record.statusCode)) {
+            sink.end();
+        }
+
+        return {
+            close: (): void => {
+                if (closed) {
+                    return;
+                }
+
+                closed = true;
+                this._removeSSE(id, sink);
+            }
+        };
+    }
+
+    // METHOD :: NUMBER? -> VOID
+    // Closes live SSE sinks for one prompt or every prompt.
+    closeSSE(id?: number): void {
+        const ids = id === undefined ? [...this._sse.keys()] : [id];
+
+        for (const promptId of ids) {
+            const set = this._sse.get(promptId);
+
+            if (set === undefined) {
+                continue;
+            }
+
+            for (const sink of [...set]) {
+                try {
+                    sink.end();
+                } catch {
+                    continue;
+                }
+            }
+
+            this._sse.delete(promptId);
+        }
+    }
+
+    // METHOD :: ctgPromptServerQueueStreamMessage -> VOID
+    // Writes a live queue message to every open SSE sink for its prompt id.
+    publishSSE(message: CTGPromptServerQueueStreamMessage): void {
+        const set = this._sse.get(message.id);
+
+        if (set === undefined) {
+            return;
+        }
+
+        const frame = `event: ${message.name}\ndata: ${JSON.stringify(message.payload)}\n\n`;
+
+        for (const sink of [...set]) {
+            try {
+                sink.write(frame);
+            } catch {
+                this._removeSSE(message.id, sink);
+            }
+        }
+    }
+
+    // METHOD :: NUMBER, NUMBER -> PROMISE(ctgPromptServerQueueRecord)
+    // Long-polls until a prompt finishes or the wait elapses.
+    async waitForPrompt(id: number, waitMs: number): Promise<CTGPromptServerQueueRecord> {
+        const clampedWaitMs = Math.min(Math.max(waitMs, 0), this._config.maxWaitMs ?? 30000);
+        const first = this.queue.read(id);
+
+        if (CTGPromptServer._isTerminal(first.statusCode)) {
+            return first;
+        }
+
+        let resolveWait: (() => void) | undefined;
+        const wait = new Promise<void>((resolve) => {
+            resolveWait = resolve;
+        });
+        const waiter = (): void => {
+            resolveWait?.();
+        };
+        const set = this._waiters.get(id) ?? new Set<CTGPromptWaiter>();
+
+        set.add(waiter);
+        this._waiters.set(id, set);
+
+        const second = this.queue.read(id);
+
+        if (CTGPromptServer._isTerminal(second.statusCode)) {
+            this._removeWaiter(id, waiter);
+            return second;
+        }
+
+        const timer = setTimeout(waiter, clampedWaitMs);
+
+        try {
+            await wait;
+        } finally {
+            clearTimeout(timer);
+            this._removeWaiter(id, waiter);
+        }
+
+        return this.queue.read(id);
+    }
+
+    // METHOD :: NUMBER -> VOID
+    // Wakes long-poll waiters and closes live SSE sinks for a terminal prompt.
+    notifyPromptFinished(id: number): void {
+        const waiters = this._waiters.get(id);
+
+        if (waiters !== undefined) {
+            for (const waiter of [...waiters]) {
+                waiter();
+            }
+            this._waiters.delete(id);
+        }
+
+        this.closeSSE(id);
     }
 
     /**
@@ -243,49 +402,7 @@ export default class CTGPromptServer {
             }
         });
 
-        app.post("/prompt", this._requireJson.bind(this), express.json({
-            limit: CTGPromptServer.BODY_LIMIT_BYTES
-        }), this._asyncRoute(async (req, res) => {
-            if (!CTGPromptServer._isObject(req.body) || Array.isArray(req.body) || !("prompt" in req.body)) {
-                throw new CTGPromptServerError("INVALID_BODY", "Body must be a JSON object with a prompt property.");
-            }
-
-            this._success(res, this.queue.submit(req.body.prompt as string), 202);
-        }));
-        app.get("/prompt/:id", this._asyncRoute(async (req, res) => {
-            const id = this._parseId(CTGPromptServer._single(req.params.id));
-            const wait = this._parseWait(req.query.wait);
-            const record = wait === null
-                ? this.queue.read(id)
-                : await this.queue.readWait(id, wait);
-
-            this._success(res, record, 200);
-        }));
-        app.get("/prompt/:id/events", this._asyncRoute(async (req, res) => {
-            const id = this._parseId(CTGPromptServer._single(req.params.id));
-
-            this._openEventStream(req, res, id);
-        }));
-        app.delete("/prompt/:id", this._asyncRoute(async (req, res) => {
-            const id = this._parseId(CTGPromptServer._single(req.params.id));
-
-            this._success(res, this.queue.cancel(id), 200);
-        }));
-        app.get("/prompts", this._asyncRoute(async (req, res) => {
-            this._success(res, this.queue.list(this._parseListQuery(req, null)), 200);
-        }));
-        app.get("/prompts/:status", this._asyncRoute(async (req, res) => {
-            const status = this._parseStatus(CTGPromptServer._single(req.params.status));
-
-            this._success(res, this.queue.list(this._parseListQuery(req, status)), 200);
-        }));
-
-        app.all(["/prompt", "/prompt/:id", "/prompt/:id/events", "/prompts", "/prompts/:status"], (_req, _res, next) => {
-            next(new CTGPromptServerError("METHOD_NOT_ALLOWED", "Method not allowed."));
-        });
-        app.use((_req, _res, next) => {
-            next(new CTGPromptServerError("NOT_FOUND", "Not found."));
-        });
+        bindRoutes(app, this);
         app.use(this._errorHandler());
 
         return app;
@@ -298,150 +415,15 @@ export default class CTGPromptServer {
         const match = /^(\S+)\s+(.+)$/.exec(header);
 
         if (match === null || match[1]?.toLowerCase() !== "bearer" || match[2] === "") {
-            throw new CTGPromptServerError("UNAUTHORIZED", "Invalid or missing credentials.");
+            throw CTGPromptServerRequestError.unauthorized("Invalid or missing credentials.");
         }
 
         const supplied = Buffer.from(match[2] ?? "", "utf8");
         const expected = Buffer.from(this._config.apiKey, "utf8");
 
         if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) {
-            throw new CTGPromptServerError("UNAUTHORIZED", "Invalid or missing credentials.");
+            throw CTGPromptServerRequestError.unauthorized("Invalid or missing credentials.");
         }
-    }
-
-    // METHOD :: request, response, nextFunction -> VOID
-    // Rejects non-JSON prompt submissions before body parsing.
-    private _requireJson(req: Request, _res: Response, next: NextFunction): void {
-        if (!req.is("application/json")) {
-            next(new CTGPromptServerError("INVALID_CONTENT_TYPE", "Content-Type must be application/json."));
-            return;
-        }
-
-        next();
-    }
-
-    // METHOD :: request, response, NUMBER -> VOID
-    // Opens and manages an SSE stream for one prompt.
-    private _openEventStream(req: Request, res: Response, id: number): void {
-        this.queue.read(id);
-        res.status(200);
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("Connection", "keep-alive");
-        res.setHeader("X-Accel-Buffering", "no");
-        res.flushHeaders();
-
-        const afterSequence = this._parseLastEventId(req.header("last-event-id"));
-        const subscription = this.queue.subscribe(id, res, afterSequence);
-        let timer: NodeJS.Timeout | null = null;
-
-        const close = (): void => {
-            if (timer !== null) {
-                clearInterval(timer);
-                timer = null;
-            }
-            subscription.close();
-        };
-
-        res.on("close", close);
-        if (!res.writableEnded) {
-            timer = setInterval(() => {
-                if (res.writableEnded) {
-                    close();
-                    return;
-                }
-                res.write(": keep-alive\n\n");
-            }, this._config.keepAliveMs);
-        }
-    }
-
-    // METHOD :: response, UNKNOWN, NUMBER -> VOID
-    // Writes a success envelope.
-    private _success(res: Response, result: PromptRecord | PromptListPage, status: number): void {
-        res.status(status).json({
-            success: true,
-            result: Array.isArray((result as PromptListPage).prompts)
-                ? {
-                    prompts: (result as PromptListPage).prompts.map((prompt) => CTGPromptServer._serializePrompt(prompt)),
-                    nextBefore: (result as PromptListPage).nextBefore
-                }
-                : CTGPromptServer._serializePrompt(result as PromptRecord)
-        });
-    }
-
-    // METHOD :: STRING? -> NUMBER
-    // Parses an id route segment.
-    private _parseId(value: string | undefined): number {
-        if (value === undefined || !/^[0-9]+$/.test(value)) {
-            throw new CTGPromptServerError("INVALID_QUERY", "Invalid query.");
-        }
-
-        return Number(value);
-    }
-
-    // METHOD :: UNKNOWN -> NUMBER?
-    // Parses the optional wait query parameter.
-    private _parseWait(value: unknown): number | null {
-        if (value === undefined) {
-            return null;
-        }
-        if (typeof value !== "string" || !/^[0-9]+$/.test(value)) {
-            throw new CTGPromptServerError("INVALID_QUERY", "Invalid query.");
-        }
-
-        return Number(value);
-    }
-
-    // METHOD :: request, promptStatus? -> promptListQuery
-    // Parses list route query parameters.
-    private _parseListQuery(req: Request, status: PromptStatus | null): PromptListQuery {
-        const limit = this._parseOptionalPositiveInteger(req.query.limit, true);
-        const before = this._parseOptionalPositiveInteger(req.query.before, false);
-
-        return {
-            ...(status === null ? {} : { status }),
-            ...(limit === undefined ? {} : { limit }),
-            ...(before === undefined ? {} : { before })
-        };
-    }
-
-    // METHOD :: UNKNOWN, BOOLEAN -> NUMBER?
-    // Parses limit or before query values.
-    private _parseOptionalPositiveInteger(value: unknown, isLimit: boolean): number | undefined {
-        if (value === undefined) {
-            return undefined;
-        }
-        if (typeof value !== "string" || !/^[0-9]+$/.test(value)) {
-            throw new CTGPromptServerError("INVALID_QUERY", "Invalid query.");
-        }
-
-        const parsed = Number(value);
-
-        if (parsed < 1 || (isLimit && parsed > this._config.maxLimit)) {
-            throw new CTGPromptServerError("INVALID_QUERY", "Invalid query.");
-        }
-
-        return parsed;
-    }
-
-    // METHOD :: STRING? -> promptStatus
-    // Parses a status route segment.
-    private _parseStatus(value: string | undefined): PromptStatus {
-        if (value === "pending" || value === "active" || value === "done" || value === "error" || value === "cancelled") {
-            return value;
-        }
-
-        throw new CTGPromptServerError("INVALID_QUERY", "Invalid query.");
-    }
-
-    // METHOD :: STRING? -> NUMBER
-    // Parses Last-Event-ID for SSE replay.
-    private _parseLastEventId(value: string | undefined): number {
-        if (value === undefined || !/^[0-9]+$/.test(value)) {
-            return 0;
-        }
-
-        return Number(value);
     }
 
     // METHOD :: VOID -> errorRequestHandler
@@ -453,39 +435,69 @@ export default class CTGPromptServer {
                 return;
             }
 
-            if (CTGPromptServerError.is(err) && typeof err.status === "number") {
-                res.status(err.status).json({
-                    success: false,
-                    result: err.toResult()
-                });
+            if (CTGPromptServerError.is(err)) {
+                err.sendResponse(res);
                 return;
             }
 
             const bodyError = CTGPromptServer._bodyReaderError(err);
 
             if (bodyError !== null) {
-                res.status(bodyError.status ?? 400).json({
-                    success: false,
-                    result: bodyError.toResult()
-                });
+                bodyError.sendResponse(res);
                 return;
             }
 
-            const error = new CTGPromptServerError("INTERNAL_ERROR", "Internal error.");
+            const error = new CTGPromptServerError(CTGPromptServerError.CODE.INTERNAL_ERROR, "Internal error.");
 
-            res.status(500).json({
-                success: false,
-                result: error.toResult()
-            });
+            error.sendResponse(res);
         };
     }
 
-    // METHOD :: ((request, response) -> PROMISE(VOID)) -> (request, response, nextFunction -> VOID)
-    // Wraps async route handlers for Express.
-    private _asyncRoute(fn: (req: Request, res: Response) => Promise<void>): (req: Request, res: Response, next: NextFunction) => void {
-        return (req: Request, res: Response, next: NextFunction): void => {
-            fn(req, res).catch(next);
+    // METHOD :: UNKNOWN -> ctgPromptRunnerConfig
+    // Validates runner config.
+    private validatedRunnerConfig(value: unknown): CTGPromptRunnerConfig {
+        if (!CTGPromptServerValidation.isObject(value)) {
+            throw new Error("runner.kind must be claude or codex.");
+        }
+
+        return {
+            kind: CTGPromptServerValidation.runnerKind(value.kind, "runner.kind"),
+            ...(value.cwd === undefined ? {} : { cwd: CTGPromptServerValidation.nonEmptyString(value.cwd, "runner.cwd") }),
+            ...(value.args === undefined ? {} : { args: CTGPromptServerValidation.stringArray(value.args, "runner.args") }),
+            ...(value.env === undefined ? {} : { env: CTGPromptServerValidation.objectEnv(value.env, "runner.env") }),
+            ...(value.timeout === undefined ? {} : { timeout: CTGPromptServerValidation.integer(value.timeout, "runner.timeout", 0, undefined) }),
+            ...(value.maxBuffer === undefined ? {} : { maxBuffer: CTGPromptServerValidation.integer(value.maxBuffer, "runner.maxBuffer", 1, undefined) })
         };
+    }
+
+    // METHOD :: NUMBER, ctgPromptSSESink -> VOID
+    // Removes one SSE sink without ending every sink for the prompt.
+    private _removeSSE(id: number, sink: CTGPromptSSESink): void {
+        const set = this._sse.get(id);
+
+        if (set === undefined) {
+            return;
+        }
+
+        set.delete(sink);
+        if (set.size === 0) {
+            this._sse.delete(id);
+        }
+    }
+
+    // METHOD :: NUMBER, ctgPromptWaiter -> VOID
+    // Removes one long-poll waiter.
+    private _removeWaiter(id: number, waiter: CTGPromptWaiter): void {
+        const set = this._waiters.get(id);
+
+        if (set === undefined) {
+            return;
+        }
+
+        set.delete(waiter);
+        if (set.size === 0) {
+            this._waiters.delete(id);
+        }
     }
 
     /**
@@ -497,7 +509,7 @@ export default class CTGPromptServer {
     // Static Factory Method :: ctgPromptServerConfig -> ctgPromptServer
     // Validates config and constructs a server instance.
     static init(config: CTGPromptServerConfig): CTGPromptServer {
-        return new this(CTGPromptServer._resolveConfig(config));
+        return new this(config);
     }
 
     /**
@@ -506,184 +518,28 @@ export default class CTGPromptServer {
      *
      */
 
-    // METHOD :: ctgPromptServerConfig -> resolvedServerConfig
-    // Validates and resolves server config defaults.
-    private static _resolveConfig(config: CTGPromptServerConfig): ResolvedServerConfig {
-        try {
-            if (!CTGPromptServer._isObject(config)) {
-                throw new Error("Config must be an object.");
-            }
-            const runner = CTGPromptServer._resolveRunnerConfig(config.runner);
-            const apiKey = CTGPromptServer._nonEmptyString(config.apiKey, "apiKey");
-            const maxLimit = CTGPromptServer._optionalInteger(config.maxLimit, "maxLimit", 1, undefined) ?? 200;
-            const defaultLimit = CTGPromptServer._optionalInteger(config.defaultLimit, "defaultLimit", 1, undefined) ?? 50;
-
-            if (defaultLimit > maxLimit) {
-                throw new Error("defaultLimit must be <= maxLimit.");
-            }
-
-            return {
-                runner,
-                apiKey,
-                host: config.host === undefined ? "127.0.0.1" : CTGPromptServer._nonEmptyString(config.host, "host"),
-                database: config.database === undefined ? "prompts.db" : CTGPromptServer._nonEmptyString(config.database, "database"),
-                initDB: CTGPromptServer._optionalBoolean(config.initDB, "initDB") ?? true,
-                concurrency: CTGPromptServer._optionalInteger(config.concurrency, "concurrency", 1, undefined) ?? 1,
-                maxPromptBytes: CTGPromptServer._optionalInteger(config.maxPromptBytes, "maxPromptBytes", 1, 131071) ?? 131071,
-                streamMode: CTGPromptServer._resolveStreamMode(config.streamMode),
-                keepAliveMs: CTGPromptServer._optionalInteger(config.keepAliveMs, "keepAliveMs", 1000, undefined) ?? 15000,
-                maxWaitMs: CTGPromptServer._optionalInteger(config.maxWaitMs, "maxWaitMs", 0, undefined) ?? 30000,
-                defaultLimit,
-                maxLimit
-            };
-        } catch (caught) {
-            if (CTGPromptServerError.is(caught)) {
-                throw caught;
-            }
-
-            throw new CTGPromptServerError("INVALID_CONFIG", caught instanceof Error ? caught.message : String(caught), {
-                cause: caught
-            });
-        }
-    }
-
-    // METHOD :: UNKNOWN -> ctgPromptRunnerConfig
-    // Validates runner config.
-    private static _resolveRunnerConfig(value: unknown): CTGPromptRunnerConfig {
-        if (!CTGPromptServer._isObject(value) || (value.kind !== "claude" && value.kind !== "codex")) {
-            throw new Error("runner.kind must be claude or codex.");
-        }
-
-        return {
-            kind: value.kind as RunnerKind,
-            ...(value.cwd === undefined ? {} : { cwd: CTGPromptServer._nonEmptyString(value.cwd, "runner.cwd") }),
-            ...(value.args === undefined ? {} : { args: CTGPromptServer._stringArray(value.args, "runner.args") }),
-            ...(value.env === undefined ? {} : { env: CTGPromptServer._objectEnv(value.env, "runner.env") }),
-            ...(value.timeout === undefined ? {} : { timeout: CTGPromptServer._integer(value.timeout, "runner.timeout", 0, undefined) }),
-            ...(value.maxBuffer === undefined ? {} : { maxBuffer: CTGPromptServer._integer(value.maxBuffer, "runner.maxBuffer", 1, undefined) })
-        };
-    }
-
-    // METHOD :: streamMode? -> streamMode
-    // Resolves the stream mode default.
-    private static _resolveStreamMode(value: unknown): StreamMode {
-        if (value === undefined) {
-            return "events";
-        }
-        if (value === "raw" || value === "events") {
-            return value;
-        }
-
-        throw new Error("streamMode must be raw or events.");
-    }
-
-    // METHOD :: promptRecord -> OBJECT
-    // Removes operator-only fields from a prompt record.
-    private static _serializePrompt(prompt: PromptRecord): Omit<PromptRecord, "info"> {
-        return {
-            id: prompt.id,
-            status: prompt.status,
-            prompt: prompt.prompt,
-            response: prompt.response,
-            errorType: prompt.errorType,
-            errorMessage: prompt.errorMessage,
-            runner: prompt.runner,
-            lastSequence: prompt.lastSequence,
-            createdAt: prompt.createdAt,
-            startedAt: prompt.startedAt,
-            finishedAt: prompt.finishedAt
-        };
-    }
-
-    // METHOD :: UNKNOWN -> BOOLEAN
-    // Narrows object values.
-    private static _isObject(value: unknown): value is Record<string, unknown> {
-        return typeof value === "object" && value !== null;
-    }
-
     // METHOD :: UNKNOWN -> ctgPromptServerError?
     // Maps Express JSON reader failures to INVALID_BODY.
     private static _bodyReaderError(value: unknown): CTGPromptServerError | null {
-        if (!CTGPromptServer._isObject(value) || typeof value.type !== "string") {
+        if (!CTGPromptServerValidation.isObject(value) || typeof value.type !== "string") {
             return null;
         }
 
         if (value.type === "entity.parse.failed") {
-            return new CTGPromptServerError("INVALID_BODY", "Body must parse as JSON.");
+            return CTGPromptServerRequestError.invalidBody("Body must parse as JSON.");
         }
         if (value.type === "entity.too.large") {
-            return new CTGPromptServerError("INVALID_BODY", `Body exceeds the maximum of ${CTGPromptServer.BODY_LIMIT_BYTES.toLocaleString("en-US")} bytes.`);
+            return CTGPromptServerRequestError.invalidBody(`Body exceeds the maximum of ${CTGPromptServer.BODY_LIMIT_BYTES.toLocaleString("en-US")} bytes.`);
         }
 
         return null;
     }
 
-    // METHOD :: STRING|[STRING]? -> STRING?
-    // Returns the first string from an Express param shape.
-    private static _single(value: string | string[] | undefined): string | undefined {
-        return Array.isArray(value) ? value[0] : value;
-    }
-
-    // METHOD :: UNKNOWN, STRING -> STRING
-    // Validates non-empty strings.
-    private static _nonEmptyString(value: unknown, label: string): string {
-        if (typeof value !== "string" || value.trim() === "") {
-            throw new Error(`${label} must be a non-empty string.`);
-        }
-
-        return value;
-    }
-
-    // METHOD :: UNKNOWN, STRING -> [STRING]
-    // Validates an array of strings.
-    private static _stringArray(value: unknown, label: string): string[] {
-        if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-            throw new Error(`${label} must be an array of strings.`);
-        }
-
-        return [...value] as string[];
-    }
-
-    // METHOD :: UNKNOWN, STRING -> nodeProcessEnv
-    // Validates a plain object for child env replacement.
-    private static _objectEnv(value: unknown, label: string): NodeJS.ProcessEnv {
-        if (!CTGPromptServer._isObject(value) || Array.isArray(value)) {
-            throw new Error(`${label} must be an object.`);
-        }
-
-        return value as NodeJS.ProcessEnv;
-    }
-
-    // METHOD :: UNKNOWN, STRING -> BOOLEAN?
-    // Validates an optional boolean.
-    private static _optionalBoolean(value: unknown, label: string): boolean | undefined {
-        if (value === undefined) {
-            return undefined;
-        }
-        if (typeof value !== "boolean") {
-            throw new Error(`${label} must be a boolean.`);
-        }
-
-        return value;
-    }
-
-    // METHOD :: UNKNOWN, STRING, NUMBER, NUMBER? -> NUMBER?
-    // Validates an optional integer range.
-    private static _optionalInteger(value: unknown, label: string, min: number, max: number | undefined): number | undefined {
-        if (value === undefined) {
-            return undefined;
-        }
-
-        return CTGPromptServer._integer(value, label, min, max);
-    }
-
-    // METHOD :: UNKNOWN, STRING, NUMBER, NUMBER? -> NUMBER
-    // Validates an integer range.
-    private static _integer(value: unknown, label: string, min: number, max: number | undefined): number {
-        if (!Number.isInteger(value) || typeof value !== "number" || value < min || (max !== undefined && value > max)) {
-            throw new Error(`${label} is outside its valid range.`);
-        }
-
-        return value;
+    // METHOD :: NUMBER -> BOOLEAN
+    // Returns whether a queue status is terminal.
+    private static _isTerminal(statusCode: number): boolean {
+        return statusCode === CTGPromptServerQueue.STATUS.DONE
+            || statusCode === CTGPromptServerQueue.STATUS.ERROR
+            || statusCode === CTGPromptServerQueue.STATUS.CANCELLED;
     }
 }

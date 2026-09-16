@@ -1,36 +1,20 @@
 // Dependencies:
-import { LLMRunnerError, LLMRunnerOutputEvent } from "ctg-ai-agent-proc"; // Upstream runner error and output event classes
-import CTGPromptServerError from "../CTGPromptServerError/CTGPromptServerError.js"; // Typed server and request errors
+import { LLMRunnerOutputEvent } from "ctg-ai-agent-proc";          // Upstream output event class
+import CTGPromptServerError from "../CTGPromptServerError/CTGPromptServerError.js"; // Typed server errors
+import CTGPromptServerRequestError from "../CTGPromptServerRequestError/CTGPromptServerRequestError.js"; // HTTP request errors
 
 // Type dependencies:
 import type {
-    AppendedEvent,                                           // Event append result
-    ClaimedPrompt,                                           // Claim result
-    CTGPromptEventSink,                                      // Event sink for subscriptions
+    CTGPromptPaginationPage,                                       // Spec2 pagination page
     CTGPromptServerQueueConfig,                                    // Queue factory config
-    CTGPromptSubscription,                                   // Subscription handle
-    EventRecord,                                             // Durable event record
-    PromptEventName,                                         // Durable event names
-    PromptListPage,                                          // List page
-    PromptListQuery,                                         // List query
-    PromptOutcomeErrorType,                                  // Outcome error class
-    PromptRecord,                                            // Durable prompt record
-    RunnerKind,                                              // Runner kind
-    StreamMode                                               // Runner stream mode
+    CTGPromptServerQueueRecord,                                    // Spec2 durable prompt record
+    CTGPromptServerQueueStreamMessage,                             // Live queue stream message
+    PromptListQuery,                                               // Temporary route query shape
+    RunnerKind,                                                    // Runner kind
+    StreamMode                                                     // Runner stream mode
 } from "../types.js";
 import type { LLMRunner, LLMRunnerResult, LLMRunnerStreamEvent } from "ctg-ai-agent-proc"; // Runner instance and stream event types
-
-/**
- *
- * Type Declarations
- *
- */
-
-// TYPE :: ctgPromptSubscription & {writeEvent:eventRecord -> VOID}
-// Internal replay-capable subscription shape.
-interface ReplaySubscription extends CTGPromptSubscription {
-    writeEvent(event: EventRecord): void;                    // Writes a replay frame through the subscription
-}
+import type { CTGPromptServerQueueStreamRecord } from "./types.js"; // Normalized stream contribution
 
 /**
  *
@@ -42,41 +26,39 @@ interface ReplaySubscription extends CTGPromptSubscription {
 export default class CTGPromptServerQueue {
 
     /* Static Fields */
-    static readonly STATUS: Readonly<Record<string, number>> = Object.freeze({
+    static readonly STATUS = Object.freeze({
         PENDING: 1,
         ACTIVE: 2,
         DONE: 3,
         ERROR: -1,
         CANCELLED: 5
-    });
+    } as const);
 
     /* Instance Fields */
-    private readonly _db: CTGPromptServerQueueConfig["db"];                     // Durable prompt store
-    private readonly _subscribers: CTGPromptServerQueueConfig["subscribers"];   // Live event fan-out
-    private readonly _runner: LLMRunner;                                  // Upstream runner
-    private readonly _runnerKind: RunnerKind;                             // Kind recorded in claims
-    private readonly _concurrency: number;                                // Maximum active runs
-    private readonly _maxPromptBytes: number;                             // Prompt byte cap
-    private readonly _streamMode: StreamMode;                             // Per-run stream mode
-    private readonly _maxWaitMs: number;                                  // Long-poll ceiling
-    private readonly _defaultLimit: number;                               // Default list size
-    private readonly _maxLimit: number;                                   // Maximum list size
-    private readonly _active: Set<number>;                                // Prompt ids currently executing
-    private readonly _running: Set<Promise<void>>;                        // Execution promises for drain()
+    private readonly _db: CTGPromptServerQueueConfig["db"];                   // Durable prompt store
+    private readonly _onStreamMessage: CTGPromptServerQueueConfig["onStreamMessage"]; // Live stream callback
+    private readonly _onPromptFinished: CTGPromptServerQueueConfig["onPromptFinished"]; // Terminal prompt callback
+    private readonly _runner: LLMRunner;                                      // Upstream runner
+    private readonly _runnerKind: RunnerKind;                                 // Runner metadata
+    private readonly _concurrency: number;                                    // Maximum active runs
+    private readonly _maxPromptBytes: number;                                 // Prompt byte cap
+    private readonly _streamMode: StreamMode;                                 // Per-run stream mode
+    private readonly _defaultLimit: number;                                   // Default list size
+    private readonly _active: Set<number>;                                    // Prompt ids currently executing
+    private readonly _running: Set<Promise<void>>;                            // Execution promises for drain()
 
     // CONSTRUCTOR :: ctgPromptServerQueueConfig -> this
-    // Wires the queue to storage, subscribers, and a runner.
+    // Wires the queue to storage, callbacks, and a runner.
     private constructor(config: CTGPromptServerQueueConfig) {
         this._db = config.db;
-        this._subscribers = config.subscribers;
+        this._onStreamMessage = config.onStreamMessage;
+        this._onPromptFinished = config.onPromptFinished;
         this._runner = config.runner;
         this._runnerKind = config.runnerKind;
         this._concurrency = config.concurrency;
         this._maxPromptBytes = config.maxPromptBytes;
         this._streamMode = config.streamMode;
-        this._maxWaitMs = config.maxWaitMs;
         this._defaultLimit = config.defaultLimit;
-        this._maxLimit = config.maxLimit;
         this._active = new Set<number>();
         this._running = new Set<Promise<void>>();
     }
@@ -87,147 +69,72 @@ export default class CTGPromptServerQueue {
      *
      */
 
-    // METHOD :: STRING -> promptRecord
-    // Validates, stores, publishes, and dispatches one prompt.
-    submit(prompt: string): PromptRecord {
+    // METHOD :: STRING -> ctgPromptServerQueueRecord
+    // Validates, stores, and dispatches one prompt.
+    submit(prompt: string): CTGPromptServerQueueRecord {
         if (typeof prompt !== "string") {
-            throw new CTGPromptServerError("INVALID_PROMPT", "Prompt must be a string.");
+            throw CTGPromptServerRequestError.invalidPrompt("Prompt must be a string.");
         }
         if (prompt.trim() === "") {
-            throw new CTGPromptServerError("INVALID_PROMPT", "Prompt must not be empty.");
+            throw CTGPromptServerRequestError.invalidPrompt("Prompt must not be empty.");
         }
 
         const bytes = Buffer.byteLength(prompt, "utf8");
 
         if (bytes > this._maxPromptBytes) {
-            throw new CTGPromptServerError("INVALID_PROMPT", `Prompt exceeds the maximum of ${this._maxPromptBytes} bytes.`, {
+            throw CTGPromptServerRequestError.invalidPrompt(`Prompt exceeds the maximum of ${this._maxPromptBytes} bytes.`, {
                 bytes,
                 maxPromptBytes: this._maxPromptBytes
             });
         }
 
-        const record = this._store(() => this._db.insertPrompt(prompt));
-        const event = this._store(() => this._db.readEvents(record.id, record.lastSequence - 1)[0]);
+        const record = this._store(() => this._db.create(prompt));
 
-        if (event === undefined) {
-            throw new CTGPromptServerError("STORE_FAILED", "Store failed.");
-        }
-
-        this._subscribers.publish(record.id, event);
+        this._emit("pending", {
+            promptId: record.id,
+            statusCode: CTGPromptServerQueue.STATUS.PENDING,
+            createdAt: record.createdAt
+        }, record.id);
         this.dispatch();
 
         return record;
     }
 
-    // METHOD :: NUMBER -> promptRecord
+    // METHOD :: NUMBER -> ctgPromptServerQueueRecord
     // Cancels a pending prompt.
-    cancel(id: number): PromptRecord {
-        const record = this._store(() => this._db.readPrompt(id));
+    cancel(id: number): CTGPromptServerQueueRecord {
+        const record = this._store(() => this._db.cancel(id));
 
-        if (record === undefined) {
-            throw new CTGPromptServerError("PROMPT_NOT_FOUND", "Prompt not found.");
-        }
-        if (record.status === "active") {
-            throw new CTGPromptServerError("CANCEL_NOT_ALLOWED", "An active prompt cannot be cancelled.", {
-                id,
-                status: record.status
-            });
-        }
-        if (CTGPromptServerQueue._isFinished(record.status)) {
-            throw new CTGPromptServerError("CANCEL_NOT_ALLOWED", "The prompt is already finished.", {
-                id,
-                status: record.status
-            });
-        }
+        this._emit("cancelled", {
+            promptId: record.id,
+            statusCode: CTGPromptServerQueue.STATUS.CANCELLED,
+            finishedAt: record.finishedAt
+        }, record.id);
+        this._onPromptFinished(id);
 
-        const appended = this._store(() => this._db.cancelPending(id));
-
-        this._subscribers.publish(id, appended.event);
-        this._subscribers.closePrompt(id);
-
-        return appended.prompt;
+        return record;
     }
 
-    // METHOD :: NUMBER -> promptRecord
+    // METHOD :: NUMBER -> ctgPromptServerQueueRecord
     // Reads a prompt by id.
-    read(id: number): PromptRecord {
-        const record = this._store(() => this._db.readPrompt(id));
+    read(id: number): CTGPromptServerQueueRecord {
+        const record = this._store(() => this._db.read(id));
 
-        if (record === undefined) {
-            throw new CTGPromptServerError("PROMPT_NOT_FOUND", "Prompt not found.");
+        if (record === null) {
+            throw CTGPromptServerRequestError.promptNotFound("Prompt not found.");
         }
 
         return record;
     }
 
-    // METHOD :: NUMBER, NUMBER -> PROMISE(promptRecord)
-    // Long-polls until a prompt finishes or the wait elapses.
-    async readWait(id: number, waitMs: number): Promise<PromptRecord> {
-        const clampedWaitMs = Math.min(Math.max(waitMs, 0), this._maxWaitMs);
-        const first = this.read(id);
-
-        if (CTGPromptServerQueue._isFinished(first.status)) {
-            return first;
-        }
-
-        let resolveWait: (() => void) | undefined;
-        const wait = new Promise<void>((resolve) => {
-            resolveWait = resolve;
-        });
-        const subscription = this._subscribers.add(id, {
-            write: () => undefined,
-            end: () => {
-                resolveWait?.();
-            }
-        });
-        const second = this.read(id);
-
-        if (CTGPromptServerQueue._isFinished(second.status)) {
-            subscription.close();
-            return second;
-        }
-
-        const timer = setTimeout(() => {
-            resolveWait?.();
-        }, clampedWaitMs);
-
-        try {
-            await wait;
-        } finally {
-            clearTimeout(timer);
-            subscription.close();
-        }
-
-        return this.read(id);
-    }
-
-    // METHOD :: promptListQuery -> promptListPage
+    // METHOD :: promptListQuery -> ctgPromptPaginationPage
     // Lists prompts through the configured page defaults.
-    list(query: PromptListQuery): PromptListPage {
-        return this._store(() => this._db.listPrompts({
-            status: query.status,
+    list(query: PromptListQuery): CTGPromptPaginationPage {
+        return this._store(() => this._db.paginate({
+            statusCode: query.status === undefined ? undefined : CTGPromptServerQueue._statusCodeFor(query.status),
             before: query.before,
             limit: query.limit ?? this._defaultLimit
         }));
-    }
-
-    // METHOD :: NUMBER, ctgPromptEventSink, NUMBER -> ctgPromptSubscription
-    // Replays history and attaches a live subscriber.
-    subscribe(id: number, sink: CTGPromptEventSink, afterSequence: number): CTGPromptSubscription {
-        const record = this.read(id);
-        const subscription = this._subscribers.add(id, sink) as ReplaySubscription;
-        const events = this._store(() => this._db.readEvents(id, afterSequence));
-
-        for (const event of events) {
-            subscription.writeEvent(event);
-        }
-
-        const last = events.at(-1);
-        if (last === undefined && CTGPromptServerQueue._isFinished(record.status)) {
-            sink.end();
-        }
-
-        return subscription;
     }
 
     // METHOD :: VOID -> NUMBER
@@ -244,18 +151,27 @@ export default class CTGPromptServerQueue {
                 return;
             }
 
-            const claimed = this._store(() => this._db.claimNextPending(this._runnerKind));
+            const claimed = this._store(() => this._db.claimNext());
 
-            if (claimed === undefined) {
+            if (claimed === null) {
                 return;
             }
 
-            const id = claimed.prompt.id;
+            const record = this._store(() => this._db.update({
+                ...claimed,
+                runner: this._runnerKind
+            }));
+            const id = record.id;
 
+            this._emit("active", {
+                promptId: id,
+                statusCode: CTGPromptServerQueue.STATUS.ACTIVE,
+                runner: this._runnerKind,
+                startedAt: record.startedAt
+            }, id);
             this._active.add(id);
-            this._subscribers.publish(id, claimed.event);
 
-            const promise = this._execute(claimed.prompt);
+            const promise = this._execute(record);
             this._running.add(promise);
             promise.finally(() => {
                 this._active.delete(id);
@@ -279,9 +195,9 @@ export default class CTGPromptServerQueue {
      *
      */
 
-    // METHOD :: promptRecord -> PROMISE(VOID)
+    // METHOD :: ctgPromptServerQueueRecord -> PROMISE(VOID)
     // Executes one active prompt and records its terminal outcome.
-    private async _execute(prompt: PromptRecord): Promise<void> {
+    private async _execute(prompt: CTGPromptServerQueueRecord): Promise<void> {
         let serverFailure: unknown = null;
         const onStream = (event: LLMRunnerStreamEvent): void => {
             try {
@@ -300,50 +216,48 @@ export default class CTGPromptServerQueue {
                 onStream
             });
         } catch (caught) {
-            try {
-                this._finishRunnerError(prompt.id, caught);
-            } catch (finishCaught) {
-                this._finishServerError(prompt.id, finishCaught);
-            }
+            this._finishError(prompt.id, CTGPromptServerError.CODE.RUNNER_FAILED, caught);
             return;
         }
 
         if (serverFailure !== null) {
-            this._finishServerError(prompt.id, serverFailure);
+            this._finishError(prompt.id, CTGPromptServerError.CODE.INTERNAL_ERROR, serverFailure);
             return;
         }
 
         try {
-            const appended = this._db.finishPrompt(prompt.id, {
-                status: "done",
-                response: result.result,
-                info: {
-                    stderr: result.error
-                }
+            const finished = this._db.finish(prompt.id, {
+                statusCode: CTGPromptServerQueue.STATUS.DONE,
+                response: result.result
             });
-
-            this._subscribers.publish(prompt.id, appended.event);
-            this._subscribers.closePrompt(prompt.id);
+            this._emit("done", {
+                promptId: finished.id,
+                statusCode: CTGPromptServerQueue.STATUS.DONE,
+                response: finished.response,
+                finishedAt: finished.finishedAt
+            }, finished.id);
+            this._onPromptFinished(prompt.id);
         } catch (caught) {
-            this._finishServerError(prompt.id, caught);
+            this._finishError(prompt.id, CTGPromptServerError.CODE.INTERNAL_ERROR, caught);
         }
     }
 
     // METHOD :: NUMBER, llmRunnerStreamEvent -> VOID
-    // Maps and stores one upstream stream event.
+    // Maps and stores one upstream stream contribution.
     private _recordStreamEvent(promptId: number, event: LLMRunnerStreamEvent): void {
         const mapped = this._mapStreamEvent(event);
         const contribution = this._responseContribution(mapped.name, mapped.payload);
-        const appended = contribution === undefined
-            ? this._db.appendEvent(promptId, mapped.name, mapped.payload)
-            : this._db.appendEvent(promptId, mapped.name, mapped.payload, contribution);
 
-        this._subscribers.publish(promptId, appended.event);
+        if (contribution !== undefined) {
+            this._db.append(promptId, contribution);
+        }
+
+        this._emit(mapped.name, mapped.payload, promptId);
     }
 
-    // METHOD :: llmRunnerStreamEvent -> {name:promptEventName, payload:UNKNOWN}
-    // Converts upstream stream event objects to durable event rows.
-    private _mapStreamEvent(event: LLMRunnerStreamEvent): { name: PromptEventName; payload: unknown } {
+    // METHOD :: llmRunnerStreamEvent -> {name:STRING, payload:UNKNOWN}
+    // Converts upstream stream event objects to internal stream payloads.
+    private _mapStreamEvent(event: LLMRunnerStreamEvent): CTGPromptServerQueueStreamRecord {
         if (event instanceof LLMRunnerOutputEvent) {
             return {
                 name: "output",
@@ -377,9 +291,9 @@ export default class CTGPromptServerQueue {
         };
     }
 
-    // METHOD :: promptEventName, UNKNOWN -> STRING?
+    // METHOD :: STRING, UNKNOWN -> STRING?
     // Extracts response text contributed by one stream event.
-    private _responseContribution(name: PromptEventName, payload: unknown): string | undefined {
+    private _responseContribution(name: "output" | "stream", payload: unknown): string | undefined {
         if (this._streamMode === "raw") {
             if (name === "output" && CTGPromptServerQueue._isObject(payload) && payload.stream === "stdout" && typeof payload.chunk === "string") {
                 return payload.chunk;
@@ -397,45 +311,34 @@ export default class CTGPromptServerQueue {
             : CTGPromptServerQueue._extractCodexText(payload.payload);
     }
 
-    // METHOD :: NUMBER, UNKNOWN -> VOID
-    // Records a runner failure outcome.
-    private _finishRunnerError(id: number, cause: unknown): void {
-        const outcome = CTGPromptServerQueue._runnerOutcome(cause);
-        const appended = this._db.finishPrompt(id, {
-            status: "error",
-            errorType: "RUNNER",
-            errorMessage: outcome.message,
-            info: outcome.info
-        });
-
-        this._subscribers.publish(id, appended.event);
-        this._subscribers.closePrompt(id);
-    }
-
-    // METHOD :: NUMBER, UNKNOWN -> VOID
-    // Records a server failure outcome if possible.
-    private _finishServerError(id: number, cause: unknown): void {
+    // METHOD :: NUMBER, NUMBER, UNKNOWN -> VOID
+    // Records a failed terminal outcome if possible.
+    private _finishError(id: number, code: number, cause: unknown): void {
         try {
             const message = cause instanceof Error ? cause.message : String(cause);
-            const type = CTGPromptServerError.is(cause) ? cause.type : cause instanceof Error ? cause.name : typeof cause;
-            const appended = this._db.finishPrompt(id, {
-                status: "error",
-                errorType: "SERVER",
-                errorMessage: message,
-                info: {
-                    type
-                }
-            });
 
-            this._subscribers.publish(id, appended.event);
-            this._subscribers.closePrompt(id);
+            const finished = this._db.finish(id, {
+                statusCode: CTGPromptServerQueue.STATUS.ERROR,
+                errorCode: code,
+                errorMessage: message
+            });
+            this._emit("error", {
+                promptId: finished.id,
+                statusCode: CTGPromptServerQueue.STATUS.ERROR,
+                error: {
+                    code: finished.errorCode,
+                    message: finished.errorMessage ?? message
+                },
+                finishedAt: finished.finishedAt
+            }, finished.id);
+            this._onPromptFinished(id);
         } catch {
             return;
         }
     }
 
     // METHOD :: (VOID -> T) -> T
-    // Converts raw storage errors in request-facing queue methods to STORE_FAILED.
+    // Converts raw storage errors in request-facing queue methods to DATABASE_FAILED.
     private _store<T>(fn: () => T): T {
         try {
             return fn();
@@ -444,10 +347,23 @@ export default class CTGPromptServerQueue {
                 throw caught;
             }
 
-            throw new CTGPromptServerError("STORE_FAILED", "Store failed.", {
+            throw new CTGPromptServerError(CTGPromptServerError.CODE.DATABASE_FAILED, "Database failed.", {
                 cause: caught
             });
         }
+    }
+
+    // METHOD :: STRING, UNKNOWN, NUMBER -> VOID
+    // Emits one live stream message to the server callback.
+    private _emit(name: string, payload: unknown, id: number): void {
+        const message: CTGPromptServerQueueStreamMessage = {
+            id,
+            name,
+            payload,
+            createdAt: Date.now()
+        };
+
+        this._onStreamMessage(message);
     }
 
     /**
@@ -480,43 +396,31 @@ export default class CTGPromptServerQueue {
      *
      */
 
-    // METHOD :: STRING -> BOOLEAN
+    // METHOD :: NUMBER -> BOOLEAN
     // Returns whether a status is terminal.
-    private static _isFinished(status: string): boolean {
-        return status === "done" || status === "error" || status === "cancelled";
+    private static _isFinished(statusCode: number): boolean {
+        return statusCode === CTGPromptServerQueue.STATUS.DONE
+            || statusCode === CTGPromptServerQueue.STATUS.ERROR
+            || statusCode === CTGPromptServerQueue.STATUS.CANCELLED;
     }
 
-    // METHOD :: STRING -> BOOLEAN
-    // Returns whether an event name is terminal.
-    private static _isFinishedEvent(name: string): boolean {
-        return name === "done" || name === "error" || name === "cancelled";
+    // METHOD :: STRING -> NUMBER
+    // Maps current route status strings to spec2 status codes.
+    private static _statusCodeFor(status: string): number {
+        switch (status) {
+            case "pending": return CTGPromptServerQueue.STATUS.PENDING;
+            case "active": return CTGPromptServerQueue.STATUS.ACTIVE;
+            case "done": return CTGPromptServerQueue.STATUS.DONE;
+            case "error": return CTGPromptServerQueue.STATUS.ERROR;
+            case "cancelled": return CTGPromptServerQueue.STATUS.CANCELLED;
+            default: return CTGPromptServerQueue.STATUS.ERROR;
+        }
     }
 
     // METHOD :: UNKNOWN -> BOOLEAN
     // Narrows plain object-like values.
     private static _isObject(value: unknown): value is Record<string, unknown> {
         return typeof value === "object" && value !== null;
-    }
-
-    // METHOD :: UNKNOWN -> {message:STRING, info:OBJECT}
-    // Builds RUNNER outcome data from a thrown value.
-    private static _runnerOutcome(cause: unknown): { message: string; info: Record<string, unknown> } {
-        if (LLMRunnerError.is(cause)) {
-            return {
-                message: cause.msg,
-                info: {
-                    runnerErrorType: cause.type,
-                    runnerErrorData: cause.data
-                }
-            };
-        }
-
-        return {
-            message: cause instanceof Error ? cause.message : String(cause),
-            info: {
-                thrown: cause instanceof Error ? cause.constructor.name : typeof cause
-            }
-        };
     }
 
     // METHOD :: UNKNOWN -> STRING?
