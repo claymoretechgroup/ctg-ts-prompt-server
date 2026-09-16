@@ -41,6 +41,15 @@ interface ReplaySubscription extends CTGPromptSubscription {
 // Prompt dispatcher and runner coordinator.
 export default class CTGPromptQueue {
 
+    /* Static Fields */
+    static readonly STATUS: Readonly<Record<string, number>> = Object.freeze({
+        PENDING: 1,
+        ACTIVE: 2,
+        DONE: 3,
+        ERROR: -1,
+        CANCELLED: 5
+    });
+
     /* Instance Fields */
     private readonly _db: CTGPromptQueueConfig["db"];                     // Durable prompt store
     private readonly _subscribers: CTGPromptQueueConfig["subscribers"];   // Live event fan-out
@@ -451,6 +460,18 @@ export default class CTGPromptQueue {
     // Creates a prompt queue.
     static init(config: CTGPromptQueueConfig): CTGPromptQueue {
         return new this(config);
+    }
+
+    // METHOD :: NUMBER -> STRING
+    // Returns the spec2 label for a durable queue status code.
+    static statusOf(code: number): string {
+        for (const [label, value] of Object.entries(CTGPromptQueue.STATUS)) {
+            if (value === code) {
+                return label;
+            }
+        }
+
+        return "ERROR";
     }
 
     /**
