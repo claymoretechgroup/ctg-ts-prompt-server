@@ -82,8 +82,8 @@ Completed on `spec-v2`:
 1. Read `docs/spec2/classes/CTGPromptServerQueue/class.md`.
 2. Compare the queue spec directly against `src/CTGPromptServerQueue/CTGPromptServerQueue.ts`.
 3. Decide whether to implement the `CTGAgentProc` queue model exactly as specified.
-4. Update tests first for the queue contract.
-5. Refactor `CTGPromptServerQueue` to pass the queue tests.
+4. Implement `CTGPromptServerQueue` relative to the spec.
+5. Add or update tests as conformance checks against the implementation, then refactor only the behavior that fails the spec-backed tests.
 6. Add live-delivery tests around `CTGPromptServer`.
 7. Run `npm run check`, `npm test`, and `npm run compile:package`.
 
