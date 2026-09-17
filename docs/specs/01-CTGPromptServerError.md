@@ -97,9 +97,9 @@ carried by PRED-01 through PRED-04.
 | ID | Member | Requirement |
 |---|---|---|
 | PRED-01 | `isCTGPromptServerErrorData` | Returns `true` for `null`, and for any value whose `typeof` is `"boolean"`, `"number"`, `"string"` or `"object"`, including an `Error` instance, an array, and `NaN`. |
-| PRED-02 | `isCTGPromptServerErrorData` | Returns `false` for `undefined`, a `symbol`, a `bigint`, and a function. |
+| PRED-02 | `isCTGPromptServerErrorData` | Returns `false` for any value that does not meet every condition of PRED-01. |
 | PRED-03 | `isCTGPromptServerErrorConfig` | Returns `true` when `typeof value` is `"object"`, `value` is not `null`, `typeof value.code` is `"number"`, [00-shared-types#PRED-01](./00-shared-types.md) `isNonEmptyString(value.message)` is `true`, and `value.data` is either absent, `undefined`, or a value for which PRED-01 is `true`. Accepted cases: `{ code: 1, message: "x" }`, `{ code: 0, message: "x" }` (a numeric code outside the registry is still a config), `{ code: 1, message: "x", data: undefined }`, `{ code: 1, message: "x", data: null }`, `{ code: 1, message: "x", data: new Error("e") }`. |
-| PRED-04 | `isCTGPromptServerErrorConfig` | Returns `false` for `null`, `undefined`, a non-object, an object without a numeric `code`, an object whose `message` is not a non-empty string (absent, `""`, or a non-string), and an object whose `data` is present and fails PRED-01. |
+| PRED-04 | `isCTGPromptServerErrorConfig` | Returns `false` for any value that does not meet every condition of PRED-03. |
 
 ## Static Fields
 
@@ -228,7 +228,7 @@ is covered by the Declarations section.
 | TEST-03 | MTHD-03 | The non-`500` branch is observed with a minimal subclass, declared in the test, whose constructor sets `status` to a number such as `404`; `CTGPromptServerRequestError` is not constructed, since it is specified and tested later. |
 | TEST-04 | STFLD-01 | Observed by deep equality against the full seventeen-entry literal, so an added or removed entry fails. |
 | TEST-05 | CNSTR-01, CNSTR-02, STMTHD-05, STMTHD-06 | The registry boundaries are cased on both sides: `0` and `17` rejected, `1` and `16` accepted. |
-| TEST-06 | CNSTR-04, PRED-04 | Cased with `null`, `undefined`, a string, a function carrying `code` and `message`, an object with no `code`, an object whose `code` is a string and whose `message` is `""` (which throws `INVALID_CODE`, not `INVALID_MESSAGE`), and an object whose `data` is a `symbol`. Each invalid value is passed to the constructor with an explicit cast to `CTGPromptServerErrorConfig`, since tests are type-checked. |
+| TEST-06 | CNSTR-04, PRED-04 | Each condition of PRED-03 is exercised by one input violating only it: `null`; a function carrying `code` and `message` (the object condition); an object with no `code`; an object whose `code` is a string; an object whose `message` is `""` (which is CNSTR-03's case, not this one, and throws `INVALID_CODE` only when `code` is also not a number); an object whose `data` is a `symbol`. Each invalid value is passed to the constructor with an explicit cast to `CTGPromptServerErrorConfig`, since tests are type-checked. |
 | TEST-07 | CNSTR-03 | Cased with `message` `""`, `message` absent, `message` explicitly `undefined`, and `message` a number, each passed with an explicit cast; the thrown `data` is compared to the rejected value, or `null` for the absent and `undefined` cases. |
-| TEST-08 | PRED-01, PRED-02, PRED-03, PRED-04 | The predicates are driven directly with the named accepted and rejected values; no instance is constructed. |
+| TEST-08 | PRED-01, PRED-02, PRED-03, PRED-04 | The predicates are driven directly: an input meeting every condition, and one input per condition violating only it; the spec does not enumerate rejected values. |
 | TEST-09 | MTHD-01, MTHD-02 | Observed by deep equality of the returned object against the literal `{ success: false, result: { code, message } }`, and by asserting [00-shared-types#PRED-05](./00-shared-types.md) `isCTGPromptServerErrorResponse` returns `true` for it. |

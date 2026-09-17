@@ -3,10 +3,10 @@
 // Dependencies:
 import CTGTest, { CTGTestPredicates as P } from "ctg-js-test";     // Pipeline API and predicate builders
 import {
-    isCTGPromptServerErrorResponse,
-    isCTGPromptServerResponse,
-    isNonEmptyString
-} from "../../src/index.ts";                                       // Shared type predicates, via the public surface
+    isCTGPromptServerErrorResponse,                                // Error-envelope predicate under test (PRED-05, PRED-06)
+    isCTGPromptServerResponse,                                     // Envelope predicate under test (PRED-03, PRED-04)
+    isNonEmptyString                                               // Non-empty string predicate under test (PRED-01, PRED-02)
+} from "../../src/index.ts";
 
 // Type dependencies:
 import type { TestFile } from "../run.ts";                        // Manifest contract consumed by the runner
