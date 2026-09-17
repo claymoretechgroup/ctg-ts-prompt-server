@@ -16,20 +16,18 @@
     "schema.sql"
   ],
   "scripts": {
-    "check": "tsc --noEmit",
+    "check": "run-s check:src check:tests",
+    "check:src": "tsc --noEmit",
+    "check:tests": "tsc -p tsconfig.tests.json",
     "clean": "node scripts/clean-dist.mjs",
     "compile": "tsc",
     "compile:package": "tsc -p tsconfig.package.json",
     "build": "run-s clean compile",
     "build:package": "run-s clean compile:package",
     "prepare": "npm run build:package",
-    "test": "tsx tests/test.ts",
-    "test:spec": "tsx tests/test.ts",
-    "start": "tsx scripts/start.ts",
-    "purge-finished": "tsx scripts/purge-finished.ts",
-    "purge-all": "tsx scripts/purge-all.ts",
-    "reset-everything": "tsx scripts/reset-everything.ts",
-    "watch": "tsx watch tests/test.ts"
+    "test": "tsx tests/run.ts spec",
+    "test:spec": "tsx tests/run.ts spec",
+    "test:live": "tsx tests/run.ts live"
   },
   "keywords": [],
   "author": "claymoretechgroup",
