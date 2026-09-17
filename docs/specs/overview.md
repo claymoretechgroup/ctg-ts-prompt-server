@@ -13,11 +13,12 @@ Exact contracts live in the focused spec files:
 
 | Document | Covers |
 |---|---|
-| [CTGPromptServerError.md](./CTGPromptServerError.md) | Base error class, code registry, error response body |
-| [CTGPromptServerRequestError.md](./CTGPromptServerRequestError.md) | HTTP request errors with status |
-| [CTGPromptServerDB.md](./CTGPromptServerDB.md) | SQLite access, record shape, pagination |
-| [CTGPromptServerQueue.md](./CTGPromptServerQueue.md) | Prompt lifecycle, dispatch, concurrency, live stream messages |
-| [CTGPromptServer.md](./CTGPromptServer.md) | HTTP, authentication, routes, SSE, long-poll, startup and shutdown |
+| [00-shared-types.md](./00-shared-types.md) | Shared types and predicates: the response envelope, `NonEmptyString` |
+| [01-CTGPromptServerError.md](./01-CTGPromptServerError.md) | Base error class, code registry, error response body |
+| [02-CTGPromptServerRequestError.md](./02-CTGPromptServerRequestError.md) | HTTP request errors with status |
+| [03-CTGPromptServerDB.md](./03-CTGPromptServerDB.md) | SQLite access, record shape, pagination |
+| [04-CTGPromptServerQueue.md](./04-CTGPromptServerQueue.md) | Prompt lifecycle, dispatch, concurrency, live stream messages |
+| [05-CTGPromptServer.md](./05-CTGPromptServer.md) | HTTP, authentication, routes, SSE, long-poll, startup and shutdown |
 | [db.md](./db.md) | SQLite schema and maintenance SQL |
 
 Each class document is self-contained: its types follow its class
@@ -43,7 +44,9 @@ The durable unit is a `CTGPromptServerQueueRecord`. The upstream
 is not stored by this service. This service stores raw prompt text and
 the lifecycle state for one submitted queue record.
 
-Each class document owns the types it declares; there is no shared type document.
+Each class document owns the types it declares. Types shared across
+classes, and the response envelope, are owned by
+[00-shared-types.md](./00-shared-types.md).
 
 ---
 
@@ -210,8 +213,8 @@ The spec separates five error domains:
 5. Internal errors report invalid configuration or unexpected service
    failures.
 
-`CTGPromptServerError` is the normalized error class. It owns
-`toResponse()` for the standard error response body. HTTP-facing request
+`CTGPromptServerError` is the normalized error class. It sends the
+standard error response body through `sendResponse(response)`. HTTP-facing request
 errors are represented by `CTGPromptServerRequestError`, which adds the
 `status` instance field. Runner, database, prompt, and internal errors
 derive labels from `CTGPromptServerError.CODE`; prompt error codes are
@@ -230,7 +233,7 @@ Errors use:
 ```
 
 The exact HTTP-facing error and prompt failure tables belong to
-[CTGPromptServerError](./CTGPromptServerError.md#types).
+[CTGPromptServerError](./01-CTGPromptServerError.md#types).
 
 ---
 
@@ -261,7 +264,7 @@ Operational limits are fixed or configured as follows:
 | Pagination maximum page size | `maxLimit`, default `200`. |
 
 Configuration validation and defaults are specified in
-[CTGPromptServer](./CTGPromptServer.md#types).
+[CTGPromptServer](./05-CTGPromptServer.md#types).
 
 Maintenance operations are script-level operations over the SQLite
 database:

@@ -577,7 +577,7 @@ Invalid configuration throws `INVALID_CONFIG` / `1` during
 by `start(...)` before the listener is bound.
 
 `CTGPromptStreamMode` is owned by
-[CTGPromptServerQueue](./CTGPromptServerQueue.md#types). The spec supports
+[CTGPromptServerQueue](./04-CTGPromptServerQueue.md#types). The spec supports
 `"raw"` and `"events"`. `"raw"` appends response text from stdout output
 chunks; `"events"` appends response text by parsing supported structured
 runner events.

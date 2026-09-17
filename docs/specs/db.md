@@ -1,7 +1,7 @@
 # ctg-ts-prompt-server database schema
 
 The SQLite schema and maintenance SQL. `CTGPromptServerDB` is the only
-class that reads or writes it; see [CTGPromptServerDB](./CTGPromptServerDB.md).
+class that reads or writes it; see [CTGPromptServerDB](./03-CTGPromptServerDB.md).
 
 ---
 

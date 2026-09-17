@@ -226,12 +226,12 @@ Creates `METHOD_NOT_ALLOWED` / `14` with HTTP status `405`.
 
 `CTGPromptServerRequestError` uses the shared error code and result
 types owned by
-[CTGPromptServerError](./CTGPromptServerError.md#types).
+[CTGPromptServerError](./01-CTGPromptServerError.md#types).
 
 The inherited `code` field and request-specific `status` field are
 assigned from constructor arguments. The inherited `label` getter is
 derived from `code`. The response body produced by inherited
-`toResponse()` is defined with [CTGPromptServer](./CTGPromptServer.md#types)
+`toResponse()` is defined with [CTGPromptServer](./05-CTGPromptServer.md#types)
 as `CTGPromptErrorResponse` and contains only public `code` and
 `message`.
 
