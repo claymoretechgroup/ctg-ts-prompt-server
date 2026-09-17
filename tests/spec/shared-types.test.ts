@@ -38,31 +38,6 @@ type Predicate = (value: unknown) => boolean;
 
 /**
  *
- * Functions
- *
- */
-
-// HELPER :: predicate, [predicateInput] -> [predicateObservation]
-// Runs a predicate over labelled inputs without losing the input label if it throws.
-const observePredicate = (predicate: Predicate, inputs: PredicateInput[]): PredicateObservation[] =>
-    inputs.map((c) => {
-        try {
-            return {
-                input: c.label,
-                accepted: predicate(c.input),
-                threw: false
-            };
-        } catch {
-            return {
-                input: c.label,
-                accepted: false,
-                threw: true
-            };
-        }
-    });
-
-/**
- *
  * Constants
  *
  */
@@ -87,6 +62,31 @@ const ARRAY_WITH_ERROR_RESULT_FIELDS = Object.assign([], {
     code: 1,
     message: "x"
 }) as unknown; // Array carrying valid error result fields.
+
+/**
+ *
+ * Functions
+ *
+ */
+
+// HELPER :: predicate, [predicateInput] -> [predicateObservation]
+// Runs a predicate over labelled inputs without losing the input label if it throws.
+const observePredicate = (predicate: Predicate, inputs: PredicateInput[]): PredicateObservation[] =>
+    inputs.map((c) => {
+        try {
+            return {
+                input: c.label,
+                accepted: predicate(c.input),
+                threw: false
+            };
+        } catch {
+            return {
+                input: c.label,
+                accepted: false,
+                threw: true
+            };
+        }
+    });
 
 const testFile: TestFile = {
     label: "shared types",
@@ -196,7 +196,7 @@ const testFile: TestFile = {
                     { input: "string", accepted: false, threw: false },
                     { input: "number", accepted: false, threw: false },
                     { input: "boolean", accepted: false, threw: false },
-                    { input: "function", accepted: false, threw: false },
+                    { input: "function envelope", accepted: false, threw: false },
                     { input: "missing success", accepted: false, threw: false },
                     { input: "non-boolean success", accepted: false, threw: false },
                     { input: "missing result", accepted: false, threw: false },
@@ -213,11 +213,11 @@ const testFile: TestFile = {
                     { label: "string", input: "x" },
                     { label: "number", input: 1 },
                     { label: "boolean", input: true },
-                    { label: "function", input: Object.assign(() => undefined, { success: true, result: 1 }) },
+                    { label: "function envelope", input: Object.assign(() => undefined, { success: false, result: { code: 1, message: "x" } }) },
                     { label: "missing success", input: { result: { code: 1, message: "x" } } },
                     { label: "non-boolean success", input: { success: "false", result: { code: 1, message: "x" } } },
                     { label: "missing result", input: { success: false } },
-                    { label: "success true", input: { success: true, result: 1 } },
+                    { label: "success true", input: { success: true, result: { code: 1, message: "x" } } },
                     { label: "null result", input: { success: false, result: null } },
                     { label: "non-object result", input: { success: false, result: "x" } },
                     { label: "function result", input: { success: false, result: Object.assign(() => undefined, { code: 1, message: "x" }) } },
